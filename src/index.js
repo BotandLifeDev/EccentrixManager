@@ -234,16 +234,6 @@ app.get("/admin/status", (req, res) => {
   }
 });
 
-app.get("/admin/sheets-debug", async (req, res) => {
-  try {
-    assertWebAuth(req);
-    const result = await createSheetsDebugSnapshot();
-    res.json(result);
-  } catch (error) {
-    sendHttpError(res, error);
-  }
-});
-
 app.post("/discord/interactions", (req, res) => {
   try {
     if (!verifyDiscordRequest(req)) {
@@ -453,6 +443,70 @@ async function handleDeveloperUpdate(update) {
   };
 }
 
+async function handleAssistantTimelineUpdate(update) {
+  validateRuntimeConfig();
+  update.developer = normalizePersonName(update.developer || "Unknown");
+  update.text = String(update.text || update.message || update.update || "").trim();
+  update.date = normalizeDate(update.date);
+
+  if (!update.text) {
+    const error = new Error("Missing update text");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const analysis = await analyzeWithGrok(update);
+  const project = resolveProject(update.project || analysis.project);
+  update.project = project.key;
+
+  const sheets = await getSheetsClient();
+  await ensureHeader(sheets, project, project.sheetName, SHEET_HEADERS);
+
+  const rows = await readRows(sheets, project, project.sheetName, "A:L");
+  const existingRows = rows
+    .slice(1)
+    .map((row, index) => ({ row, rowNumber: index + 2 }))
+    .filter((item) => isMeaningfulTimelineRow(item.row))
+    .slice(-Math.max(1, env.timelineContextLimit || 1000))
+    .map((item) => timelineRowToObject(item));
+
+  const decision = await decideTimelineUpdateTargetWithGrok(project, update, analysis, existingRows);
+  let patchUpdates = normalizeTimelinePatchUpdates(decision.updates);
+  if (decision.mode === "patch" && patchUpdates.length === 0) {
+    const rowNumber = inferTimelinePatchRowNumber(decision, existingRows, update, analysis);
+    patchUpdates = rowNumber ? buildDefaultTimelinePatchUpdates(rowNumber, update, analysis) : [];
+  }
+
+  if (decision.mode === "patch" && patchUpdates.length > 0) {
+    const patchResult = await patchSheetCellsFromAction({
+      project: project.key,
+      sheet: "timeline",
+      updates: patchUpdates,
+    });
+
+    return {
+      ok: true,
+      mode: "updated_existing",
+      project,
+      update,
+      analysis,
+      decision,
+      patchResult,
+    };
+  }
+
+  await appendTimelineRow(sheets, project, update, analysis);
+
+  return {
+    ok: true,
+    mode: "created_new",
+    project,
+    update,
+    analysis,
+    decision,
+  };
+}
+
 async function handleFeedback(feedback) {
   validateRuntimeConfig();
   feedback.developer = normalizePersonName(feedback.developer);
@@ -552,6 +606,7 @@ async function handleAssistantChat(body) {
           "actions must be an array. Only include actions when the user clearly asks to save, update, create, register, send, or generate something.",
           "Supported action types: save_update, save_feedback, set_weekly_target, generate_weekly_plan, update_timeline_field, patch_sheet_cells, send_discord_report.",
           "For save_update use fields: project, developer, text, date.",
+          "When the user asks to update a timeline from a progress paragraph, search the provided timeline rows first. If an existing row is related by task, feature, developer, system, art area, blocker, next step, or date, use patch_sheet_cells for that row. Use save_update only when no related timeline row exists.",
           "For save_feedback use fields: project, developer, text, date.",
           "For set_weekly_target use fields: project, owner, target, weekStart.",
           "For generate_weekly_plan use fields: project, weekStart. project may be empty for both projects.",
@@ -562,7 +617,8 @@ async function handleAssistantChat(body) {
           "Never claim Google Sheets were edited unless you include the exact edit action in actions. If you only analyzed data, say that no sheet edit was performed.",
           "If a required field is missing, do not create the action; ask a concise follow-up in reply.",
           "When answering timeline questions, rely on the provided projects context. If contextSummary shows zero recentTimeline rows, clearly say the timeline was not loaded and suggest checking sheet tab names and sheet IDs.",
-          "Keep Thai if the user writes Thai.",
+          "The user may write in Thai, English, or mixed language. Understand Thai normally, but reply and visualProgressOverview must be English only.",
+          "Do not translate action values that will be written to Google Sheets; preserve the source language for saved timeline, feedback, target, and plan content.",
         ].join("\n"),
       },
       {
@@ -603,14 +659,21 @@ async function executeAssistantActions(actions) {
     const type = String(action.type || "").trim();
 
     if (type === "save_update") {
-      const result = await handleDeveloperUpdate({
+      const result = await handleAssistantTimelineUpdate({
         project: action.project,
         developer: action.developer || action.name || "Unknown",
         text: action.text || action.message || action.update,
         date: normalizeDate(action.date),
         source: "assistant-chat:/save_update",
       });
-      results.push({ type, ok: true, project: result.project.label, summary: result.analysis.summary });
+      results.push({
+        type,
+        ok: true,
+        project: result.project.label,
+        summary: result.analysis.summary,
+        mode: result.mode,
+        editedCells: result.patchResult?.editedCells || 0,
+      });
       continue;
     }
 
@@ -666,51 +729,6 @@ async function executeAssistantActions(actions) {
   }
 
   return results;
-}
-
-async function createSheetsDebugSnapshot() {
-  validateRuntimeConfig();
-
-  const sheets = await getSheetsClient();
-  const weekStart = currentWeekStartBangkok();
-  const projects = [];
-
-  for (const project of Object.values(PROJECTS)) {
-    const context = await buildProjectManagementContext(sheets, project, weekStart);
-    projects.push({
-      key: project.key,
-      label: project.label,
-      spreadsheetIdTail: String(project.spreadsheetId || "").slice(-8),
-      sheetTabs: {
-        timeline: project.sheetName,
-        feedback: project.feedbackSheetName,
-        targets: project.targetSheetName,
-        plan: project.planSheetName,
-      },
-      counts: {
-        timelineTotal: context.rowCounts.timeline,
-        timelineMeaningful: context.rowCounts.meaningfulTimeline,
-        timelineContextLimit: context.rowCounts.timelineContextLimit,
-        recentTimeline: context.recentTimeline.length,
-        feedbackTotal: context.rowCounts.feedback,
-        openFeedback: context.openFeedback.length,
-        weeklyTargetsTotal: context.rowCounts.weeklyTargets,
-        weeklyTargets: context.weeklyTargets.length,
-        weeklyPlanTotal: context.rowCounts.weeklyPlan,
-        currentPlan: context.currentPlan.length,
-      },
-      lastTimelineRows: context.recentTimeline.slice(-5),
-      lastWeeklyTargets: context.weeklyTargets.slice(-3),
-      lastPlanRows: context.currentPlan.slice(-5),
-    });
-  }
-
-  return {
-    ok: true,
-    date: todayBangkok(),
-    weekStart,
-    projects,
-  };
 }
 
 async function updateTimelineFieldFromAction(action) {
@@ -810,6 +828,99 @@ function normalizeSheetCellPatch(update, sheetInfo) {
     header: field.header,
     value: String(update.value ?? ""),
   };
+}
+
+function normalizeTimelinePatchUpdates(updates) {
+  const allowedFields = new Set([
+    "Date",
+    "Developer",
+    "Raw Update",
+    "Summary",
+    "Completed",
+    "In Progress",
+    "Blockers",
+    "Next Steps",
+    "Tags",
+    "Confidence",
+  ]);
+
+  return (Array.isArray(updates) ? updates : [])
+    .map((update) => {
+      const field = resolveSheetField(SHEET_HEADERS, update.field || update.column || update.header);
+      const rowNumber = Number(update.rowNumber || update.row || update.sheetRow);
+      if (!Number.isInteger(rowNumber) || rowNumber < 2 || !field || !allowedFields.has(field.header)) {
+        return null;
+      }
+
+      return {
+        rowNumber,
+        field: field.header,
+        value: String(update.value ?? ""),
+      };
+    })
+    .filter(Boolean);
+}
+
+function inferTimelinePatchRowNumber(decision, existingRows, update, analysis) {
+  const explicitRow = (Array.isArray(decision.updates) ? decision.updates : [])
+    .map((item) => Number(item.rowNumber || item.row || item.sheetRow))
+    .find((rowNumber) => Number.isInteger(rowNumber) && rowNumber >= 2);
+  if (explicitRow) return explicitRow;
+
+  const incomingText = [
+    update.developer,
+    update.text,
+    analysis.summary,
+    ...analysis.completed,
+    ...analysis.inProgress,
+    ...analysis.blockers,
+    ...analysis.nextSteps,
+    ...analysis.tags,
+  ].join(" ");
+  const incomingTokens = tokenizeForTimelineMatch(incomingText);
+  let best = { rowNumber: 0, score: 0 };
+
+  for (const row of existingRows) {
+    const rowText = [
+      row.developer,
+      row.rawUpdate,
+      row.summary,
+      row.completed,
+      row.inProgress,
+      row.blockers,
+      row.nextSteps,
+      row.tags,
+    ].join(" ");
+    const rowTokens = tokenizeForTimelineMatch(rowText);
+    const score = [...incomingTokens].reduce(
+      (total, token) => total + (rowTokens.has(token) ? 1 : 0),
+      0,
+    );
+    if (score > best.score) best = { rowNumber: row.rowNumber, score };
+  }
+
+  return best.score >= 2 ? best.rowNumber : 0;
+}
+
+function buildDefaultTimelinePatchUpdates(rowNumber, update, analysis) {
+  return [
+    { rowNumber, field: "Date", value: update.date },
+    { rowNumber, field: "Developer", value: update.developer },
+    { rowNumber, field: "Raw Update", value: update.text },
+    { rowNumber, field: "Summary", value: analysis.summary },
+    { rowNumber, field: "Completed", value: analysis.completed.join("\n") },
+    { rowNumber, field: "In Progress", value: analysis.inProgress.join("\n") },
+    { rowNumber, field: "Blockers", value: analysis.blockers.join("\n") },
+    { rowNumber, field: "Next Steps", value: analysis.nextSteps.join("\n") },
+    { rowNumber, field: "Tags", value: analysis.tags.join(", ") },
+    { rowNumber, field: "Confidence", value: analysis.confidence },
+  ];
+}
+
+function tokenizeForTimelineMatch(value) {
+  const normalized = String(value || "").toLowerCase();
+  const tokens = normalized.match(/[a-z0-9ก-๙]{3,}/g) || [];
+  return new Set(tokens);
 }
 
 function resolveEditableSheet(project, value) {
@@ -1000,6 +1111,60 @@ async function analyzeWithGrok(update) {
     nextSteps: asArray(parsed.nextSteps),
     tags: asArray(parsed.tags),
     confidence: Number(parsed.confidence || 0),
+  };
+}
+
+async function decideTimelineUpdateTargetWithGrok(project, update, analysis, existingRows) {
+  if (existingRows.length === 0) {
+    return { mode: "append", reason: "No existing timeline rows were available.", updates: [] };
+  }
+
+  const response = await grok.chat.completions.create({
+    model: env.grokModel,
+    temperature: 0.1,
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content: [
+          PM_ASSISTANT_SYSTEM_PROMPT,
+          "Decide whether a new progress update should update existing timeline rows or create a new row.",
+          "Prefer mode patch when any existing row is related by task, feature, developer, system, art area, blocker, next step, date, or milestone.",
+          "Use mode append only when no existing row is genuinely related.",
+          "Return only valid JSON with keys: mode, reason, updates.",
+          "mode must be patch or append.",
+          "updates is an array of { rowNumber, field, value } using rowNumber from existingRows.",
+          "Allowed fields: Date, Developer, Raw Update, Summary, Completed, In Progress, Blockers, Next Steps, Tags, Confidence.",
+          "Never edit Source or Created At. Keep Thai when the input is Thai.",
+        ].join("\n"),
+      },
+      {
+        role: "user",
+        content: JSON.stringify({
+          project: project.label,
+          incomingUpdate: {
+            date: update.date,
+            developer: update.developer,
+            rawUpdate: update.text,
+            summary: analysis.summary,
+            completed: analysis.completed,
+            inProgress: analysis.inProgress,
+            blockers: analysis.blockers,
+            nextSteps: analysis.nextSteps,
+            tags: analysis.tags,
+            confidence: analysis.confidence,
+          },
+          existingRows,
+        }),
+      },
+    ],
+  });
+
+  const parsed = parseJsonObject(response.choices?.[0]?.message?.content);
+  return {
+    mode: String(parsed.mode || "").trim().toLowerCase() === "patch" ? "patch" : "append",
+    reason: String(parsed.reason || "").trim(),
+    updates: Array.isArray(parsed.updates) ? parsed.updates : [],
   };
 }
 

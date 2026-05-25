@@ -62,15 +62,6 @@ function bindButtons() {
     addChatMessage("assistant", "Ask me to inspect the timeline, summarize risks, or save updates to Google Sheets.");
   });
 
-  document.querySelector("#checkSheetsBtn").addEventListener("click", async (event) => {
-    const data = await getJson("/admin/sheets-debug", event.currentTarget);
-    if (!data) {
-      addChatMessage("assistant", "Could not read sheets. Check WEB_FORM_SECRET, sheet IDs, and sharing permissions.");
-      return;
-    }
-    addChatMessage("assistant", formatSheetsDebug(data));
-  });
-
   document.querySelectorAll("[data-action]").forEach((button) => {
     button.addEventListener("click", async () => {
       await postJson(button.dataset.action, {}, button);
@@ -167,28 +158,6 @@ async function postJson(endpoint, body, button) {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
-    print(data);
-    return data;
-  } catch (error) {
-    print({ error: error.message });
-    return null;
-  } finally {
-    if (button) {
-      button.disabled = false;
-      button.textContent = originalText;
-    }
-  }
-}
-
-async function getJson(endpoint, button) {
-  const originalText = button?.textContent;
-  if (button) {
-    button.disabled = true;
-    button.textContent = "Checking...";
-  }
-
-  try {
-    const data = await request(endpoint, { method: "GET" });
     print(data);
     return data;
   } catch (error) {
@@ -303,30 +272,12 @@ function formatAppliedAction(item) {
     return `- ${item.type}: ${item.project} / ${item.sheet}, edited ${item.editedCells} cells (${item.updatedFields.join(", ")})`;
   }
 
-  return `- ${item.type}: ${item.project || item.weekStart || "done"}`;
-}
+  if (item.type === "save_update") {
+    const mode = item.mode === "updated_existing" ? `updated existing (${item.editedCells} cells)` : "created new row";
+    return `- ${item.type}: ${item.project}, ${mode}`;
+  }
 
-function formatSheetsDebug(data) {
-  return [
-    `Sheets debug (${data.date})`,
-    ...data.projects.map((project) => [
-      "",
-      project.label,
-      `Timeline rows total: ${project.counts.timelineTotal}`,
-      `Timeline rows with data: ${project.counts.timelineMeaningful}`,
-      `Timeline rows sent to AI: ${project.counts.recentTimeline} / ${project.counts.timelineContextLimit}`,
-      `Feedback rows total: ${project.counts.feedbackTotal}`,
-      `Open feedback loaded: ${project.counts.openFeedback}`,
-      `Weekly targets total: ${project.counts.weeklyTargetsTotal}`,
-      `Weekly targets this week: ${project.counts.weeklyTargets}`,
-      `Weekly plan rows total: ${project.counts.weeklyPlanTotal}`,
-      `Current plan rows this week: ${project.counts.currentPlan}`,
-      `Tabs: ${project.sheetTabs.timeline}, ${project.sheetTabs.feedback}, ${project.sheetTabs.targets}, ${project.sheetTabs.plan}`,
-      project.lastTimelineRows.length
-        ? `Latest timeline: ${project.lastTimelineRows.map((row) => `#${row.rowNumber} ${row.date} ${row.developer}: ${row.summary || row.rawUpdate}`).join(" | ")}`
-        : "Latest timeline: none loaded",
-    ].join("\n")),
-  ].join("\n");
+  return `- ${item.type}: ${item.project || item.weekStart || "done"}`;
 }
 
 function escapeHtml(value) {

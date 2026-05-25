@@ -26,6 +26,7 @@
 
       <nav class="tabs" aria-label="Dashboard sections">
         <button class="tab is-active" type="button" data-panel="workPanel">Update</button>
+        <button class="tab" type="button" data-panel="chatPanel">AI Chat</button>
         <button class="tab" type="button" data-panel="feedbackPanel">Feedback</button>
         <button class="tab" type="button" data-panel="planningPanel">Plan</button>
         <button class="tab" type="button" data-panel="analysisPanel">Analyze</button>
@@ -56,6 +57,30 @@
             </label>
           </div>
         </form>
+
+        <section class="panel" id="chatPanel">
+          <div class="panel-head">
+            <h2>AI Project Manager Chat</h2>
+            <button id="clearChatBtn" type="button">Clear Chat</button>
+          </div>
+          <div class="chat-layout">
+            <div class="chat-stream" id="chatStream" aria-live="polite">
+              <article class="chat-message assistant">
+                <strong>AI PM</strong>
+                <p>Ask me to inspect the timeline, summarize risks, or save updates to Google Sheets.</p>
+              </article>
+            </div>
+            <form class="chat-form" id="assistantChatForm">
+              <select name="project" aria-label="Project scope">
+                <option value="">Both projects</option>
+                <option value="dynozoic">Dynozoic timeline</option>
+                <option value="eaa">Earth Atlantis Abyss</option>
+              </select>
+              <textarea name="message" required rows="4" placeholder="Example: Check current timeline risks, or save update: นน finished checkpoint for EAA today"></textarea>
+              <button type="submit">Send To AI</button>
+            </form>
+          </div>
+        </section>
 
         <form class="panel" id="feedbackPanel" data-endpoint="/feedback">
           <div class="panel-head">

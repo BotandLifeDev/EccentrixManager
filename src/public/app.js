@@ -1,12 +1,14 @@
 const state = {
   secret: localStorage.getItem("eccentrixSecret") || "",
   status: null,
+  chatHistory: [],
 };
 
 const output = document.querySelector("#output");
 const secretInput = document.querySelector("#secretInput");
 const statusGrid = document.querySelector("#statusGrid");
 const interactionEndpoint = document.querySelector("#interactionEndpoint");
+const chatStream = document.querySelector("#chatStream");
 
 secretInput.value = state.secret;
 setDefaultDates();
@@ -51,7 +53,13 @@ function bindButtons() {
   });
 
   document.querySelector("#clearOutputBtn").addEventListener("click", () => {
-    output.textContent = "พร้อมใช้งาน";
+    output.textContent = "Ready";
+  });
+
+  document.querySelector("#clearChatBtn").addEventListener("click", () => {
+    state.chatHistory = [];
+    chatStream.innerHTML = "";
+    addChatMessage("assistant", "Ask me to inspect the timeline, summarize risks, or save updates to Google Sheets.");
   });
 
   document.querySelectorAll("[data-action]").forEach((button) => {
@@ -69,6 +77,11 @@ function bindButtons() {
     await navigator.clipboard.writeText(interactionEndpoint.value);
     print("Copied interaction endpoint.");
   });
+
+  document.querySelector("#assistantChatForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await submitChat(event.currentTarget);
+  });
 }
 
 async function submitForm(form) {
@@ -80,6 +93,41 @@ async function submitForm(form) {
   });
 
   await postJson(form.dataset.endpoint, data, button);
+}
+
+async function submitChat(form) {
+  const button = form.querySelector('button[type="submit"]');
+  const formData = Object.fromEntries(new FormData(form).entries());
+  const message = String(formData.message || "").trim();
+  const project = String(formData.project || "").trim();
+  if (!message) return;
+
+  addChatMessage("user", message);
+  form.elements.message.value = "";
+
+  const result = await postJson("/assistant/chat", {
+    project,
+    message,
+    history: state.chatHistory,
+  }, button);
+
+  if (!result) {
+    addChatMessage("assistant", "Request failed. Check WEB_FORM_SECRET and server logs.");
+    return;
+  }
+
+  const overviewText = result.visualProgressOverview
+    ? `\n\nVisual Progress Overview:\n${formatOverview(result.visualProgressOverview)}`
+    : "";
+  const actionsText = result.actionsApplied?.length
+    ? `\n\nActions applied:\n${result.actionsApplied.map((item) => `- ${item.type}: ${item.project || item.weekStart || "done"}`).join("\n")}`
+    : "";
+  const reply = `${result.reply || "Done."}${overviewText}${actionsText}`;
+
+  addChatMessage("assistant", reply);
+  state.chatHistory.push({ role: "user", content: message });
+  state.chatHistory.push({ role: "assistant", content: result.reply || "Done." });
+  state.chatHistory = state.chatHistory.slice(-8);
 }
 
 async function loadStatus() {
@@ -172,6 +220,26 @@ function statusCard(label, value, tone) {
 
 function print(value) {
   output.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+}
+
+function addChatMessage(role, text) {
+  const article = document.createElement("article");
+  article.className = `chat-message ${role}`;
+
+  const label = document.createElement("strong");
+  label.textContent = role === "user" ? "You" : "AI PM";
+
+  const body = document.createElement("p");
+  body.textContent = text;
+
+  article.append(label, body);
+  chatStream.append(article);
+  chatStream.scrollTop = chatStream.scrollHeight;
+}
+
+function formatOverview(value) {
+  if (typeof value === "string") return value;
+  return JSON.stringify(value, null, 2);
 }
 
 function escapeHtml(value) {

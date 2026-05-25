@@ -184,6 +184,15 @@ const grok = env.grokApiKey
 let discordClient = null;
 let dailyReportTimer = null;
 
+const PM_ASSISTANT_SYSTEM_PROMPT = [
+  "You are an AI Project Manager Assistant responsible for managing project updates, timelines, reporting, and workflow organization.",
+  "Your responsibilities include tracking daily progress updates from the team, updating project timelines and schedules in real-time, managing and editing Google Sheets provided via shared links, monitoring task completion status, deadlines, and milestones, identifying delayed, blocked, or high-risk tasks, sending reminders and warnings for tasks that are close to deadlines or falling behind schedule, helping prioritize tasks and adjust development plans when needed, maintaining clear project structure and organization, creating concise daily summaries for the team and stakeholders, generating visual summaries, charts, progress reports, and timeline overviews every day, and helping ensure the project stays on track and aligned with its target milestones.",
+  "Workflow rules: wait for daily work updates from the user or team members; analyze progress and compare it against the current timeline; automatically update schedules, milestones, and completion percentages when the user clearly asks for changes; detect schedule risks and recommend solutions or adjustments; highlight critical tasks that require immediate attention; organize updates into clean summaries with clear priorities; maintain consistency between all project documents and Google Sheets; when a Google Sheet link is provided, access and manage the sheet structure appropriately through the available backend tools; always keep the timeline realistic and updated based on actual development speed; assist with production planning, resource balancing, and milestone management.",
+  "Communication style: professional, concise, proactive, highly organized, focused on productivity and delivery, clear with priorities and deadlines, and solution-oriented rather than passive.",
+  "Daily output format when producing a report: Daily Progress Summary, Completed Tasks, In Progress Tasks, Blocked/Risk Tasks, Timeline Changes, Upcoming Priorities, Deadline Warnings, Suggested Actions, Visual Progress Overview.",
+  "Your goal is to function as a reliable production manager that helps keep the entire project moving efficiently and on schedule.",
+].join("\n");
+
 const app = express();
 app.use(
   "/discord/interactions",
@@ -364,6 +373,16 @@ app.post("/timeline-analysis", async (req, res) => {
   }
 });
 
+app.post("/assistant/chat", async (req, res) => {
+  try {
+    assertWebAuth(req);
+    const result = await handleAssistantChat(req.body);
+    res.json(result);
+  } catch (error) {
+    sendHttpError(res, error);
+  }
+});
+
 app.get("/cron/daily-report", async (req, res) => {
   try {
     assertCronAuth(req);
@@ -472,6 +491,135 @@ async function handleWeeklyTarget(target) {
   };
 }
 
+async function handleAssistantChat(body) {
+  validateRuntimeConfig();
+
+  const message = String(body.message || body.text || "").trim();
+  const history = Array.isArray(body.history) ? body.history.slice(-8) : [];
+  const projectKey = normalizeProjectKey(body.project || "");
+
+  if (!message) {
+    const error = new Error("Missing chat message");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const sheets = await getSheetsClient();
+  const weekStart = currentWeekStartBangkok();
+  const projects = projectKey ? [resolveProject(projectKey)] : Object.values(PROJECTS);
+  const context = [];
+
+  for (const project of projects) {
+    context.push(await buildProjectManagementContext(sheets, project, weekStart));
+  }
+
+  const response = await grok.chat.completions.create({
+    model: env.grokModel,
+    temperature: 0.2,
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content: [
+          PM_ASSISTANT_SYSTEM_PROMPT,
+          "Return only valid JSON with keys: reply, actions, visualProgressOverview.",
+          "actions must be an array. Only include actions when the user clearly asks to save, update, create, register, send, or generate something.",
+          "Supported action types: save_update, save_feedback, set_weekly_target, generate_weekly_plan, send_discord_report.",
+          "For save_update use fields: project, developer, text, date.",
+          "For save_feedback use fields: project, developer, text, date.",
+          "For set_weekly_target use fields: project, owner, target, weekStart.",
+          "For generate_weekly_plan use fields: project, weekStart. project may be empty for both projects.",
+          "For send_discord_report use field: message.",
+          "If a required field is missing, do not create the action; ask a concise follow-up in reply.",
+          "Keep Thai if the user writes Thai.",
+        ].join("\n"),
+      },
+      {
+        role: "user",
+        content: JSON.stringify({
+          today: todayBangkok(),
+          weekStart,
+          projects: context,
+          chatHistory: history,
+          userMessage: message,
+        }),
+      },
+    ],
+  });
+
+  const parsed = parseJsonObject(response.choices?.[0]?.message?.content);
+  const actions = Array.isArray(parsed.actions) ? parsed.actions : [];
+  const appliedActions = await executeAssistantActions(actions);
+
+  return {
+    ok: true,
+    reply: String(parsed.reply || "").trim() || "Done.",
+    visualProgressOverview: parsed.visualProgressOverview || null,
+    actionsRequested: actions,
+    actionsApplied: appliedActions,
+  };
+}
+
+async function executeAssistantActions(actions) {
+  const results = [];
+
+  for (const action of actions.slice(0, 5)) {
+    const type = String(action.type || "").trim();
+
+    if (type === "save_update") {
+      const result = await handleDeveloperUpdate({
+        project: action.project,
+        developer: action.developer || action.name || "Unknown",
+        text: action.text || action.message || action.update,
+        date: normalizeDate(action.date),
+        source: "assistant-chat:/save_update",
+      });
+      results.push({ type, ok: true, project: result.project.label, summary: result.analysis.summary });
+      continue;
+    }
+
+    if (type === "save_feedback") {
+      const result = await handleFeedback({
+        project: action.project,
+        developer: action.developer || action.name || "Unknown",
+        text: action.text || action.message || action.feedback,
+        date: normalizeDate(action.date),
+        source: "assistant-chat:/save_feedback",
+      });
+      results.push({ type, ok: true, project: result.project.label, summary: result.analysis.summary });
+      continue;
+    }
+
+    if (type === "set_weekly_target") {
+      const result = await handleWeeklyTarget(normalizeWeeklyTarget({
+        project: action.project,
+        owner: action.owner,
+        target: action.target || action.text || action.message,
+        weekStart: action.weekStart || action.week,
+      }, "assistant-chat:/set_weekly_target"));
+      results.push({ type, ok: true, project: result.project.label, target: result.aiTarget.refinedTarget });
+      continue;
+    }
+
+    if (type === "generate_weekly_plan") {
+      const project = action.project ? resolveProject(action.project) : null;
+      const weekStart = normalizeWeekStart(action.weekStart || action.week);
+      const result = await createAndSaveWeeklyPlan(project?.key, weekStart, "assistant-chat:/generate_weekly_plan");
+      results.push({ type, ok: true, weekStart: result.weekStart, projects: result.results.map((item) => item.project) });
+      continue;
+    }
+
+    if (type === "send_discord_report") {
+      const message = String(action.message || "").trim();
+      if (!message) continue;
+      await sendDiscordReport(message);
+      results.push({ type, ok: true });
+    }
+  }
+
+  return results;
+}
+
 async function analyzeWithGrok(update) {
   const response = await grok.chat.completions.create({
     model: env.grokModel,
@@ -480,8 +628,7 @@ async function analyzeWithGrok(update) {
     messages: [
       {
         role: "system",
-        content:
-          "You turn messy developer daily updates into concise timeline data. Return only valid JSON.",
+        content: `${PM_ASSISTANT_SYSTEM_PROMPT}\n\nTurn messy developer daily updates into concise timeline data. Return only valid JSON.`,
       },
       {
         role: "user",
@@ -521,8 +668,7 @@ async function analyzeFeedbackWithGrok(project, feedback) {
     messages: [
       {
         role: "system",
-        content:
-          "You analyze game development feedback. Return only valid JSON.",
+        content: `${PM_ASSISTANT_SYSTEM_PROMPT}\n\nAnalyze game development feedback. Return only valid JSON.`,
       },
       {
         role: "user",
@@ -553,8 +699,7 @@ async function refineWeeklyTargetWithGrok(project, target, context) {
     messages: [
       {
         role: "system",
-        content:
-          "You are an AI project manager for a small game studio. Return only valid JSON.",
+        content: `${PM_ASSISTANT_SYSTEM_PROMPT}\n\nRefine weekly targets for a small game studio. Return only valid JSON.`,
       },
       {
         role: "user",
@@ -589,8 +734,7 @@ async function createWeeklyPlanWithGrok(project, weekStart, target, context) {
     messages: [
       {
         role: "system",
-        content:
-          "You are an AI project manager assigning weekly work by role. Return only valid JSON.",
+        content: `${PM_ASSISTANT_SYSTEM_PROMPT}\n\nAssign weekly work by role. Return only valid JSON.`,
       },
       {
         role: "user",
@@ -682,8 +826,7 @@ async function createDailySummary(date = todayBangkok(), projectKey = "dynozoic"
     messages: [
       {
         role: "system",
-        content:
-          "Create a concise Thai daily engineering summary for Discord. Mention progress, blockers, next steps, and unresolved feedback reminders.",
+        content: `${PM_ASSISTANT_SYSTEM_PROMPT}\n\nCreate a concise Thai daily production summary for Discord. Use the required daily output format when useful. Mention progress, blockers, timeline changes, deadline warnings, next priorities, and unresolved feedback reminders.`,
       },
       {
         role: "user",
@@ -750,8 +893,7 @@ async function createWeeklyGoalReport(projectKey = "") {
     messages: [
       {
         role: "system",
-        content:
-          "You are a producer. Create a Thai weekly goal report for Discord. Include week targets, current progress percentage, risk, and next actions.",
+        content: `${PM_ASSISTANT_SYSTEM_PROMPT}\n\nCreate a Thai weekly goal report for Discord. Include week targets, current progress percentage, risk, deadline warnings, visual progress overview, and next actions.`,
       },
       {
         role: "user",
@@ -789,8 +931,7 @@ async function createMilestoneReport() {
     messages: [
       {
         role: "system",
-        content:
-          "You are a senior game producer. Analyze milestone status for Discord in Thai.",
+        content: `${PM_ASSISTANT_SYSTEM_PROMPT}\n\nAnalyze milestone status for Discord in Thai.`,
       },
       {
         role: "user",
@@ -831,8 +972,7 @@ async function createCurrentTimelineAnalysisReport() {
     messages: [
       {
         role: "system",
-        content:
-          "You are an AI project manager. Analyze current game timelines for Discord in Thai.",
+        content: `${PM_ASSISTANT_SYSTEM_PROMPT}\n\nAnalyze current game timelines for Discord in Thai.`,
       },
       {
         role: "user",

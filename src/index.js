@@ -170,6 +170,7 @@ const env = {
   discordUpdateChannelId: process.env.DISCORD_UPDATE_CHANNEL_ID,
   discordReportChannelId: process.env.DISCORD_REPORT_CHANNEL_ID,
   dailyReportTime: process.env.DAILY_REPORT_TIME || "21:00",
+  timelineContextLimit: Number(process.env.TIMELINE_CONTEXT_LIMIT || 1000),
   enableDiscordBot: process.env.ENABLE_DISCORD_BOT === "true",
   cronSecret: process.env.CRON_SECRET,
   webFormSecret: process.env.WEB_FORM_SECRET,
@@ -655,6 +656,8 @@ async function createSheetsDebugSnapshot() {
       },
       counts: {
         timelineTotal: context.rowCounts.timeline,
+        timelineMeaningful: context.rowCounts.meaningfulTimeline,
+        timelineContextLimit: context.rowCounts.timelineContextLimit,
         recentTimeline: context.recentTimeline.length,
         feedbackTotal: context.rowCounts.feedback,
         openFeedback: context.openFeedback.length,
@@ -682,6 +685,8 @@ function summarizeProjectContexts(contexts) {
     project: context.project,
     weekStart: context.weekStart,
     timelineTotalCount: context.rowCounts.timeline,
+    timelineMeaningfulCount: context.rowCounts.meaningfulTimeline,
+    timelineContextLimit: context.rowCounts.timelineContextLimit,
     recentTimelineCount: context.recentTimeline.length,
     feedbackTotalCount: context.rowCounts.feedback,
     openFeedbackCount: context.openFeedback.length,
@@ -1240,18 +1245,25 @@ async function buildProjectManagementContext(sheets, project, weekStart) {
   const feedbackRows = await readRows(sheets, project, project.feedbackSheetName, "A:I");
   const targetRows = await readRows(sheets, project, project.targetSheetName, "A:I");
   const planRows = await readRows(sheets, project, project.planSheetName, "A:K");
+  const timelineDataRows = timelineRows.slice(1);
+  const meaningfulTimelineRows = timelineDataRows.filter(isMeaningfulTimelineRow);
+  const timelineContextLimit = Math.max(1, env.timelineContextLimit || 1000);
+  const timelineRowsForAi = meaningfulTimelineRows.slice(-timelineContextLimit);
 
   return {
     project: project.label,
     weekStart,
     team: teamPromptData(project.key),
     rowCounts: {
-      timeline: Math.max(0, timelineRows.length - 1),
+      timeline: timelineDataRows.length,
+      meaningfulTimeline: meaningfulTimelineRows.length,
+      timelineSentToAi: timelineRowsForAi.length,
+      timelineContextLimit,
       feedback: Math.max(0, feedbackRows.length - 1),
       weeklyTargets: Math.max(0, targetRows.length - 1),
       weeklyPlan: Math.max(0, planRows.length - 1),
     },
-    recentTimeline: rowsToObjects(timelineRows.slice(1).slice(-30)),
+    recentTimeline: rowsToObjects(timelineRowsForAi),
     openFeedback: feedbackRows
       .slice(1)
       .filter((row) => String(row[6] || "").toLowerCase() !== "done")
@@ -1999,6 +2011,19 @@ function rowsToObjects(rows) {
     nextSteps: row[7] || "",
     tags: row[8] || "",
   }));
+}
+
+function isMeaningfulTimelineRow(row) {
+  return [
+    row[0],
+    row[1],
+    row[2],
+    row[3],
+    row[4],
+    row[5],
+    row[6],
+    row[7],
+  ].some((value) => String(value || "").trim());
 }
 
 function feedbackRowToObject(row) {

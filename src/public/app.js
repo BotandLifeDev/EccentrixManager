@@ -62,6 +62,15 @@ function bindButtons() {
     addChatMessage("assistant", "Ask me to inspect the timeline, summarize risks, or save updates to Google Sheets.");
   });
 
+  document.querySelector("#checkSheetsBtn").addEventListener("click", async (event) => {
+    const data = await getJson("/admin/sheets-debug", event.currentTarget);
+    if (!data) {
+      addChatMessage("assistant", "Could not read sheets. Check WEB_FORM_SECRET, sheet IDs, and sharing permissions.");
+      return;
+    }
+    addChatMessage("assistant", formatSheetsDebug(data));
+  });
+
   document.querySelectorAll("[data-action]").forEach((button) => {
     button.addEventListener("click", async () => {
       await postJson(button.dataset.action, {}, button);
@@ -119,10 +128,13 @@ async function submitChat(form) {
   const overviewText = result.visualProgressOverview
     ? `\n\nVisual Progress Overview:\n${formatOverview(result.visualProgressOverview)}`
     : "";
+  const contextText = result.contextSummary
+    ? `\n\nLoaded Timeline Context:\n${formatContextSummary(result.contextSummary)}`
+    : "";
   const actionsText = result.actionsApplied?.length
     ? `\n\nActions applied:\n${result.actionsApplied.map((item) => `- ${item.type}: ${item.project || item.weekStart || "done"}`).join("\n")}`
     : "";
-  const reply = `${result.reply || "Done."}${overviewText}${actionsText}`;
+  const reply = `${result.reply || "Done."}${contextText}${overviewText}${actionsText}`;
 
   addChatMessage("assistant", reply);
   state.chatHistory.push({ role: "user", content: message });
@@ -155,6 +167,28 @@ async function postJson(endpoint, body, button) {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
+    print(data);
+    return data;
+  } catch (error) {
+    print({ error: error.message });
+    return null;
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalText;
+    }
+  }
+}
+
+async function getJson(endpoint, button) {
+  const originalText = button?.textContent;
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Checking...";
+  }
+
+  try {
+    const data = await request(endpoint, { method: "GET" });
     print(data);
     return data;
   } catch (error) {
@@ -240,6 +274,42 @@ function addChatMessage(role, text) {
 function formatOverview(value) {
   if (typeof value === "string") return value;
   return JSON.stringify(value, null, 2);
+}
+
+function formatContextSummary(summary) {
+  return summary.map((item) => [
+    `- ${item.project}`,
+    `  timeline total: ${item.timelineTotalCount}`,
+    `  timeline sent to AI: ${item.recentTimelineCount}`,
+    `  feedback total: ${item.feedbackTotalCount}`,
+    `  open feedback: ${item.openFeedbackCount}`,
+    `  targets total: ${item.weeklyTargetTotalCount}`,
+    `  targets this week: ${item.weeklyTargetCount}`,
+    `  plan total: ${item.weeklyPlanTotalCount}`,
+    `  plan this week: ${item.currentPlanCount}`,
+  ].join("\n")).join("\n");
+}
+
+function formatSheetsDebug(data) {
+  return [
+    `Sheets debug (${data.date})`,
+    ...data.projects.map((project) => [
+      "",
+      project.label,
+      `Timeline rows total: ${project.counts.timelineTotal}`,
+      `Timeline rows sent to AI: ${project.counts.recentTimeline}`,
+      `Feedback rows total: ${project.counts.feedbackTotal}`,
+      `Open feedback loaded: ${project.counts.openFeedback}`,
+      `Weekly targets total: ${project.counts.weeklyTargetsTotal}`,
+      `Weekly targets this week: ${project.counts.weeklyTargets}`,
+      `Weekly plan rows total: ${project.counts.weeklyPlanTotal}`,
+      `Current plan rows this week: ${project.counts.currentPlan}`,
+      `Tabs: ${project.sheetTabs.timeline}, ${project.sheetTabs.feedback}, ${project.sheetTabs.targets}, ${project.sheetTabs.plan}`,
+      project.lastTimelineRows.length
+        ? `Latest timeline: ${project.lastTimelineRows.map((row) => `${row.date} ${row.developer}: ${row.summary || row.rawUpdate}`).join(" | ")}`
+        : "Latest timeline: none loaded",
+    ].join("\n")),
+  ].join("\n");
 }
 
 function escapeHtml(value) {

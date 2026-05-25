@@ -219,6 +219,16 @@ app.get("/admin/status", (req, res) => {
   }
 });
 
+app.get("/admin/sheets-debug", async (req, res) => {
+  try {
+    assertWebAuth(req);
+    const result = await createSheetsDebugSnapshot();
+    res.json(result);
+  } catch (error) {
+    sendHttpError(res, error);
+  }
+});
+
 app.post("/discord/interactions", (req, res) => {
   try {
     if (!verifyDiscordRequest(req)) {
@@ -512,6 +522,7 @@ async function handleAssistantChat(body) {
   for (const project of projects) {
     context.push(await buildProjectManagementContext(sheets, project, weekStart));
   }
+  const contextSummary = summarizeProjectContexts(context);
 
   const response = await grok.chat.completions.create({
     model: env.grokModel,
@@ -531,6 +542,7 @@ async function handleAssistantChat(body) {
           "For generate_weekly_plan use fields: project, weekStart. project may be empty for both projects.",
           "For send_discord_report use field: message.",
           "If a required field is missing, do not create the action; ask a concise follow-up in reply.",
+          "When answering timeline questions, rely on the provided projects context. If contextSummary shows zero recentTimeline rows, clearly say the timeline was not loaded and suggest checking sheet tab names and sheet IDs.",
           "Keep Thai if the user writes Thai.",
         ].join("\n"),
       },
@@ -539,6 +551,7 @@ async function handleAssistantChat(body) {
         content: JSON.stringify({
           today: todayBangkok(),
           weekStart,
+          contextSummary,
           projects: context,
           chatHistory: history,
           userMessage: message,
@@ -554,6 +567,7 @@ async function handleAssistantChat(body) {
   return {
     ok: true,
     reply: String(parsed.reply || "").trim() || "Done.",
+    contextSummary,
     visualProgressOverview: parsed.visualProgressOverview || null,
     actionsRequested: actions,
     actionsApplied: appliedActions,
@@ -618,6 +632,71 @@ async function executeAssistantActions(actions) {
   }
 
   return results;
+}
+
+async function createSheetsDebugSnapshot() {
+  validateRuntimeConfig();
+
+  const sheets = await getSheetsClient();
+  const weekStart = currentWeekStartBangkok();
+  const projects = [];
+
+  for (const project of Object.values(PROJECTS)) {
+    const context = await buildProjectManagementContext(sheets, project, weekStart);
+    projects.push({
+      key: project.key,
+      label: project.label,
+      spreadsheetIdTail: String(project.spreadsheetId || "").slice(-8),
+      sheetTabs: {
+        timeline: project.sheetName,
+        feedback: project.feedbackSheetName,
+        targets: project.targetSheetName,
+        plan: project.planSheetName,
+      },
+      counts: {
+        timelineTotal: context.rowCounts.timeline,
+        recentTimeline: context.recentTimeline.length,
+        feedbackTotal: context.rowCounts.feedback,
+        openFeedback: context.openFeedback.length,
+        weeklyTargetsTotal: context.rowCounts.weeklyTargets,
+        weeklyTargets: context.weeklyTargets.length,
+        weeklyPlanTotal: context.rowCounts.weeklyPlan,
+        currentPlan: context.currentPlan.length,
+      },
+      lastTimelineRows: context.recentTimeline.slice(-5),
+      lastWeeklyTargets: context.weeklyTargets.slice(-3),
+      lastPlanRows: context.currentPlan.slice(-5),
+    });
+  }
+
+  return {
+    ok: true,
+    date: todayBangkok(),
+    weekStart,
+    projects,
+  };
+}
+
+function summarizeProjectContexts(contexts) {
+  return contexts.map((context) => ({
+    project: context.project,
+    weekStart: context.weekStart,
+    timelineTotalCount: context.rowCounts.timeline,
+    recentTimelineCount: context.recentTimeline.length,
+    feedbackTotalCount: context.rowCounts.feedback,
+    openFeedbackCount: context.openFeedback.length,
+    weeklyTargetTotalCount: context.rowCounts.weeklyTargets,
+    weeklyTargetCount: context.weeklyTargets.length,
+    weeklyPlanTotalCount: context.rowCounts.weeklyPlan,
+    currentPlanCount: context.currentPlan.length,
+    latestTimeline: context.recentTimeline.slice(-3).map((row) => ({
+      date: row.date,
+      developer: row.developer,
+      summary: row.summary || row.rawUpdate,
+      blockers: row.blockers,
+      nextSteps: row.nextSteps,
+    })),
+  }));
 }
 
 async function analyzeWithGrok(update) {
@@ -1166,6 +1245,12 @@ async function buildProjectManagementContext(sheets, project, weekStart) {
     project: project.label,
     weekStart,
     team: teamPromptData(project.key),
+    rowCounts: {
+      timeline: Math.max(0, timelineRows.length - 1),
+      feedback: Math.max(0, feedbackRows.length - 1),
+      weeklyTargets: Math.max(0, targetRows.length - 1),
+      weeklyPlan: Math.max(0, planRows.length - 1),
+    },
     recentTimeline: rowsToObjects(timelineRows.slice(1).slice(-30)),
     openFeedback: feedbackRows
       .slice(1)

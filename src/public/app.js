@@ -132,7 +132,7 @@ async function submitChat(form) {
     ? `\n\nLoaded Timeline Context:\n${formatContextSummary(result.contextSummary)}`
     : "";
   const actionsText = result.actionsApplied?.length
-    ? `\n\nActions applied:\n${result.actionsApplied.map((item) => `- ${item.type}: ${item.project || item.weekStart || "done"}`).join("\n")}`
+    ? `\n\nActions applied:\n${result.actionsApplied.map(formatAppliedAction).join("\n")}`
     : "";
   const reply = `${result.reply || "Done."}${contextText}${overviewText}${actionsText}`;
 
@@ -291,6 +291,21 @@ function formatContextSummary(summary) {
   ].join("\n")).join("\n");
 }
 
+function formatAppliedAction(item) {
+  if (item.type === "update_timeline_field") {
+    const projects = item.projects
+      .map((project) => `${project.label}: ${project.editedCells} cells`)
+      .join(", ");
+    return `- ${item.type}: ${item.field} = ${item.value}, edited ${item.editedCells} cells (${projects})`;
+  }
+
+  if (item.type === "patch_sheet_cells") {
+    return `- ${item.type}: ${item.project} / ${item.sheet}, edited ${item.editedCells} cells (${item.updatedFields.join(", ")})`;
+  }
+
+  return `- ${item.type}: ${item.project || item.weekStart || "done"}`;
+}
+
 function formatSheetsDebug(data) {
   return [
     `Sheets debug (${data.date})`,
@@ -308,7 +323,7 @@ function formatSheetsDebug(data) {
       `Current plan rows this week: ${project.counts.currentPlan}`,
       `Tabs: ${project.sheetTabs.timeline}, ${project.sheetTabs.feedback}, ${project.sheetTabs.targets}, ${project.sheetTabs.plan}`,
       project.lastTimelineRows.length
-        ? `Latest timeline: ${project.lastTimelineRows.map((row) => `${row.date} ${row.developer}: ${row.summary || row.rawUpdate}`).join(" | ")}`
+        ? `Latest timeline: ${project.lastTimelineRows.map((row) => `#${row.rowNumber} ${row.date} ${row.developer}: ${row.summary || row.rawUpdate}`).join(" | ")}`
         : "Latest timeline: none loaded",
     ].join("\n")),
   ].join("\n");

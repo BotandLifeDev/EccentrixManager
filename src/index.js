@@ -82,6 +82,20 @@ const PLAN_HEADERS = [
   "Created At",
 ];
 
+const TIMELINE_EDIT_FIELDS = {
+  completed: { header: "Completed", column: "E" },
+  "completed tasks": { header: "Completed", column: "E" },
+  inprogress: { header: "In Progress", column: "F" },
+  "in progress": { header: "In Progress", column: "F" },
+  blockers: { header: "Blockers", column: "G" },
+  blocker: { header: "Blockers", column: "G" },
+  blocked: { header: "Blockers", column: "G" },
+  "next steps": { header: "Next Steps", column: "H" },
+  nextsteps: { header: "Next Steps", column: "H" },
+  tags: { header: "Tags", column: "I" },
+  confidence: { header: "Confidence", column: "J" },
+};
+
 const TEAM_MEMBERS = [
   {
     name: "ทีน",
@@ -536,12 +550,16 @@ async function handleAssistantChat(body) {
           PM_ASSISTANT_SYSTEM_PROMPT,
           "Return only valid JSON with keys: reply, actions, visualProgressOverview.",
           "actions must be an array. Only include actions when the user clearly asks to save, update, create, register, send, or generate something.",
-          "Supported action types: save_update, save_feedback, set_weekly_target, generate_weekly_plan, send_discord_report.",
+          "Supported action types: save_update, save_feedback, set_weekly_target, generate_weekly_plan, update_timeline_field, patch_sheet_cells, send_discord_report.",
           "For save_update use fields: project, developer, text, date.",
           "For save_feedback use fields: project, developer, text, date.",
           "For set_weekly_target use fields: project, owner, target, weekStart.",
           "For generate_weekly_plan use fields: project, weekStart. project may be empty for both projects.",
+          "For update_timeline_field use fields: project, field, value, scope. Allowed fields: completed, inProgress, blockers, nextSteps, tags, confidence. scope can be all or meaningful_rows. project may be empty for both projects.",
+          "For patch_sheet_cells use fields: project, sheet, updates. sheet can be timeline, feedback, targets, or plan. updates is an array of { rowNumber, field, value }. rowNumber is the Google Sheet row number provided in context rows. field must match an existing header or supported alias.",
+          "Use patch_sheet_cells when you need to edit many specific timeline rows after analyzing the full sheet context. Keep updates focused and do not edit Date, Source, or Created At unless the user explicitly asks.",
           "For send_discord_report use field: message.",
+          "Never claim Google Sheets were edited unless you include the exact edit action in actions. If you only analyzed data, say that no sheet edit was performed.",
           "If a required field is missing, do not create the action; ask a concise follow-up in reply.",
           "When answering timeline questions, rely on the provided projects context. If contextSummary shows zero recentTimeline rows, clearly say the timeline was not loaded and suggest checking sheet tab names and sheet IDs.",
           "Keep Thai if the user writes Thai.",
@@ -562,12 +580,15 @@ async function handleAssistantChat(body) {
   });
 
   const parsed = parseJsonObject(response.choices?.[0]?.message?.content);
-  const actions = Array.isArray(parsed.actions) ? parsed.actions : [];
+  let actions = Array.isArray(parsed.actions) ? parsed.actions : [];
+  if (actions.length === 0) {
+    actions = inferAssistantActionsFromMessage(message, projectKey);
+  }
   const appliedActions = await executeAssistantActions(actions);
 
   return {
     ok: true,
-    reply: String(parsed.reply || "").trim() || "Done.",
+    reply: buildAssistantReply(parsed.reply, actions, appliedActions),
     contextSummary,
     visualProgressOverview: parsed.visualProgressOverview || null,
     actionsRequested: actions,
@@ -621,6 +642,18 @@ async function executeAssistantActions(actions) {
       const weekStart = normalizeWeekStart(action.weekStart || action.week);
       const result = await createAndSaveWeeklyPlan(project?.key, weekStart, "assistant-chat:/generate_weekly_plan");
       results.push({ type, ok: true, weekStart: result.weekStart, projects: result.results.map((item) => item.project) });
+      continue;
+    }
+
+    if (type === "update_timeline_field") {
+      const result = await updateTimelineFieldFromAction(action);
+      results.push({ type, ok: true, ...result });
+      continue;
+    }
+
+    if (type === "patch_sheet_cells") {
+      const result = await patchSheetCellsFromAction(action);
+      results.push({ type, ok: true, ...result });
       continue;
     }
 
@@ -680,6 +713,231 @@ async function createSheetsDebugSnapshot() {
   };
 }
 
+async function updateTimelineFieldFromAction(action) {
+  const field = resolveTimelineEditField(action.field || action.column || action.header);
+  const value = String(action.value ?? "").trim();
+  const scope = String(action.scope || "meaningful_rows").trim().toLowerCase();
+  const targetProjects = action.project ? [resolveProject(action.project)] : Object.values(PROJECTS);
+  const sheets = await getSheetsClient();
+  const projects = [];
+
+  if (!field) {
+    const error = new Error("Unsupported timeline field for edit");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  for (const project of targetProjects) {
+    await ensureHeader(sheets, project, project.sheetName, SHEET_HEADERS);
+    const rows = await readRows(sheets, project, project.sheetName, "A:L");
+    const rowIndexes = rows
+      .slice(1)
+      .map((row, index) => ({ row, sheetRow: index + 2 }))
+      .filter((item) => scope === "all" || isMeaningfulTimelineRow(item.row))
+      .map((item) => item.sheetRow);
+
+    if (rowIndexes.length > 0) {
+      await updateSingleColumnRows(sheets, project, project.sheetName, field.column, rowIndexes, value);
+    }
+
+    projects.push({
+      key: project.key,
+      label: project.label,
+      field: field.header,
+      value,
+      scope,
+      editedCells: rowIndexes.length,
+    });
+  }
+
+  return {
+    field: field.header,
+    value,
+    scope,
+    projects,
+    editedCells: projects.reduce((total, project) => total + project.editedCells, 0),
+  };
+}
+
+async function patchSheetCellsFromAction(action) {
+  const project = resolveProject(action.project);
+  const sheetInfo = resolveEditableSheet(project, action.sheet || action.tab || "timeline");
+  const rawUpdates = Array.isArray(action.updates) ? action.updates : [];
+  const updates = rawUpdates
+    .map((update) => normalizeSheetCellPatch(update, sheetInfo))
+    .filter(Boolean);
+
+  if (updates.length === 0) {
+    const error = new Error("No valid sheet cell updates to apply");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const sheets = await getSheetsClient();
+  await ensureHeader(sheets, project, sheetInfo.sheetName, sheetInfo.headers);
+
+  await batchUpdateValueRanges(
+    sheets,
+    project.spreadsheetId,
+    updates.map((update) => ({
+      range: `${quoteSheet(sheetInfo.sheetName)}!${update.column}${update.rowNumber}`,
+      values: [[update.value]],
+    })),
+  );
+
+  return {
+    project: project.label,
+    sheet: sheetInfo.sheetName,
+    editedCells: updates.length,
+    updatedFields: [...new Set(updates.map((update) => update.header))],
+    firstUpdates: updates.slice(0, 10).map((update) => ({
+      rowNumber: update.rowNumber,
+      field: update.header,
+      value: update.value,
+    })),
+  };
+}
+
+function normalizeSheetCellPatch(update, sheetInfo) {
+  const rowNumber = Number(update.rowNumber || update.row || update.sheetRow);
+  const field = resolveSheetField(sheetInfo.headers, update.field || update.column || update.header);
+
+  if (!Number.isInteger(rowNumber) || rowNumber < 2 || !field) return null;
+
+  return {
+    rowNumber,
+    column: columnLetter(field.index + 1),
+    header: field.header,
+    value: String(update.value ?? ""),
+  };
+}
+
+function resolveEditableSheet(project, value) {
+  const key = String(value || "").trim().toLowerCase();
+  const sheets = {
+    timeline: { sheetName: project.sheetName, headers: SHEET_HEADERS },
+    main: { sheetName: project.sheetName, headers: SHEET_HEADERS },
+    feedback: { sheetName: project.feedbackSheetName, headers: FEEDBACK_HEADERS },
+    targets: { sheetName: project.targetSheetName, headers: TARGET_HEADERS },
+    weeklytargets: { sheetName: project.targetSheetName, headers: TARGET_HEADERS },
+    target: { sheetName: project.targetSheetName, headers: TARGET_HEADERS },
+    plan: { sheetName: project.planSheetName, headers: PLAN_HEADERS },
+    weeklyplan: { sheetName: project.planSheetName, headers: PLAN_HEADERS },
+  };
+
+  const info = sheets[key.replace(/[\s_-]/g, "")] || sheets[key] || sheets.timeline;
+  return { ...info };
+}
+
+function resolveSheetField(headers, value) {
+  const input = normalizeFieldName(value);
+  if (!input) return null;
+
+  const aliases = {
+    rawupdate: "Raw Update",
+    update: "Raw Update",
+    message: "Raw Update",
+    inprogress: "In Progress",
+    progress: "In Progress",
+    blockers: "Blockers",
+    blocker: "Blockers",
+    nextsteps: "Next Steps",
+    next: "Next Steps",
+    createdat: "Created At",
+    weeklytarget: "AI Refined Target",
+    target: "AI Refined Target",
+    status: "Status",
+    task: "Task",
+    priority: "Priority",
+  };
+  const canonical = aliases[input] || value;
+  const normalizedCanonical = normalizeFieldName(canonical);
+  const index = headers.findIndex((header) => normalizeFieldName(header) === normalizedCanonical);
+
+  if (index < 0) return null;
+  return { index, header: headers[index] };
+}
+
+function normalizeFieldName(value) {
+  return String(value || "").trim().toLowerCase().replace(/[^a-z0-9ก-๙]/g, "");
+}
+
+async function updateSingleColumnRows(sheets, project, sheetName, column, rowIndexes, value) {
+  const ranges = contiguousRowRanges(rowIndexes).map((range) => ({
+    range: `${quoteSheet(sheetName)}!${column}${range.start}:${column}${range.end}`,
+    values: Array.from({ length: range.end - range.start + 1 }, () => [value]),
+  }));
+
+  if (ranges.length === 0) return;
+
+  await batchUpdateValueRanges(sheets, project.spreadsheetId, ranges);
+}
+
+async function batchUpdateValueRanges(sheets, spreadsheetId, ranges) {
+  const chunkSize = 500;
+  for (let index = 0; index < ranges.length; index += chunkSize) {
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        valueInputOption: "USER_ENTERED",
+        data: ranges.slice(index, index + chunkSize),
+      },
+    });
+  }
+}
+
+function contiguousRowRanges(rowIndexes) {
+  const sorted = [...rowIndexes].sort((a, b) => a - b);
+  const ranges = [];
+
+  for (const row of sorted) {
+    const last = ranges[ranges.length - 1];
+    if (last && row === last.end + 1) {
+      last.end = row;
+    } else {
+      ranges.push({ start: row, end: row });
+    }
+  }
+
+  return ranges;
+}
+
+function resolveTimelineEditField(value) {
+  const key = String(value || "").trim().toLowerCase().replace(/[_-]/g, " ");
+  const compact = key.replace(/\s+/g, "");
+  return TIMELINE_EDIT_FIELDS[key] || TIMELINE_EDIT_FIELDS[compact] || null;
+}
+
+function inferAssistantActionsFromMessage(message, projectKey) {
+  const text = String(message || "").toLowerCase();
+  const asksToEdit = /(ปรับ|แก้|เปลี่ยน|set|update|change|make)/i.test(message);
+  const mentionsBlocker = text.includes("blocker") || text.includes("blockers") || message.includes("บล็อก") || message.includes("ติด");
+  const mentionsZero = /(^|\D)0($|\D)/.test(message) || message.includes("ศูนย์");
+  const mentionsAll = message.includes("ทั้งหมด") || text.includes("all");
+
+  if (asksToEdit && mentionsBlocker && mentionsZero && mentionsAll) {
+    return [{
+      type: "update_timeline_field",
+      project: projectKey || "",
+      field: "blockers",
+      value: "0",
+      scope: "meaningful_rows",
+    }];
+  }
+
+  return [];
+}
+
+function buildAssistantReply(reply, actions, appliedActions) {
+  const text = String(reply || "").trim();
+  if (appliedActions.length > 0) return text || "Sheet update completed.";
+  if (actions.length > 0) return text || "No sheet changes were applied.";
+  if (/แก้|ปรับ|เปลี่ยน|updated|changed|บันทึก|save/i.test(text)) {
+    return `${text}\n\nNote: No Google Sheets edit action was applied by the backend.`;
+  }
+  return text || "Done.";
+}
+
 function summarizeProjectContexts(contexts) {
   return contexts.map((context) => ({
     project: context.project,
@@ -695,6 +953,7 @@ function summarizeProjectContexts(contexts) {
     weeklyPlanTotalCount: context.rowCounts.weeklyPlan,
     currentPlanCount: context.currentPlan.length,
     latestTimeline: context.recentTimeline.slice(-3).map((row) => ({
+      rowNumber: row.rowNumber,
       date: row.date,
       developer: row.developer,
       summary: row.summary || row.rawUpdate,
@@ -1246,7 +1505,9 @@ async function buildProjectManagementContext(sheets, project, weekStart) {
   const targetRows = await readRows(sheets, project, project.targetSheetName, "A:I");
   const planRows = await readRows(sheets, project, project.planSheetName, "A:K");
   const timelineDataRows = timelineRows.slice(1);
-  const meaningfulTimelineRows = timelineDataRows.filter(isMeaningfulTimelineRow);
+  const meaningfulTimelineRows = timelineDataRows
+    .map((row, index) => ({ row, rowNumber: index + 2 }))
+    .filter((item) => isMeaningfulTimelineRow(item.row));
   const timelineContextLimit = Math.max(1, env.timelineContextLimit || 1000);
   const timelineRowsForAi = meaningfulTimelineRows.slice(-timelineContextLimit);
 
@@ -1263,19 +1524,22 @@ async function buildProjectManagementContext(sheets, project, weekStart) {
       weeklyTargets: Math.max(0, targetRows.length - 1),
       weeklyPlan: Math.max(0, planRows.length - 1),
     },
-    recentTimeline: rowsToObjects(timelineRowsForAi),
+    recentTimeline: timelineRowsForAi.map((item) => timelineRowToObject(item)),
     openFeedback: feedbackRows
       .slice(1)
-      .filter((row) => String(row[6] || "").toLowerCase() !== "done")
-      .map(feedbackRowToObject),
+      .map((row, index) => ({ row, rowNumber: index + 2 }))
+      .filter((item) => String(item.row[6] || "").toLowerCase() !== "done")
+      .map((item) => feedbackRowToObject(item.row, item.rowNumber)),
     weeklyTargets: targetRows
       .slice(1)
-      .filter((row) => row[0] === weekStart)
-      .map(targetRowToObject),
+      .map((row, index) => ({ row, rowNumber: index + 2 }))
+      .filter((item) => item.row[0] === weekStart)
+      .map((item) => targetRowToObject(item.row, item.rowNumber)),
     currentPlan: planRows
       .slice(1)
-      .filter((row) => row[0] === weekStart)
-      .map(planRowToObject),
+      .map((row, index) => ({ row, rowNumber: index + 2 }))
+      .filter((item) => item.row[0] === weekStart)
+      .map((item) => planRowToObject(item.row, item.rowNumber)),
   };
 }
 
@@ -1999,8 +2263,9 @@ function parseJsonObject(value) {
   }
 }
 
-function rowsToObjects(rows) {
-  return rows.map((row) => ({
+function rowsToObjects(rows, startRowNumber = 2) {
+  return rows.map((row, index) => ({
+    rowNumber: startRowNumber + index,
     date: row[0] || "",
     developer: row[1] || "",
     rawUpdate: row[2] || "",
@@ -2011,6 +2276,22 @@ function rowsToObjects(rows) {
     nextSteps: row[7] || "",
     tags: row[8] || "",
   }));
+}
+
+function timelineRowToObject(item) {
+  const row = item.row || item;
+  return {
+    rowNumber: item.rowNumber || 0,
+    date: row[0] || "",
+    developer: row[1] || "",
+    rawUpdate: row[2] || "",
+    summary: row[3] || "",
+    completed: row[4] || "",
+    inProgress: row[5] || "",
+    blockers: row[6] || "",
+    nextSteps: row[7] || "",
+    tags: row[8] || "",
+  };
 }
 
 function isMeaningfulTimelineRow(row) {
@@ -2026,8 +2307,9 @@ function isMeaningfulTimelineRow(row) {
   ].some((value) => String(value || "").trim());
 }
 
-function feedbackRowToObject(row) {
+function feedbackRowToObject(row, rowNumber = 0) {
   return {
+    rowNumber,
     date: row[0] || "",
     developer: row[1] || "",
     feedback: row[2] || "",
@@ -2038,8 +2320,9 @@ function feedbackRowToObject(row) {
   };
 }
 
-function targetRowToObject(row) {
+function targetRowToObject(row, rowNumber = 0) {
   return {
+    rowNumber,
     weekStart: row[0] || "",
     project: row[1] || "",
     owner: row[2] || "",
@@ -2051,8 +2334,9 @@ function targetRowToObject(row) {
   };
 }
 
-function planRowToObject(row) {
+function planRowToObject(row, rowNumber = 0) {
   return {
+    rowNumber,
     weekStart: row[0] || "",
     project: row[1] || "",
     assignee: row[2] || "",

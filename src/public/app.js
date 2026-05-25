@@ -158,6 +158,19 @@ async function postJson(endpoint, body, button) {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
+    if (data?.requiresConfirmation) {
+      print(formatDiscordPreview(data));
+      const confirmed = window.confirm(`Send this ${data.title || "message"} to Discord?`);
+      if (!confirmed) return data;
+
+      const confirmedData = await request(endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...body, confirm: true }),
+      });
+      print(confirmedData);
+      return confirmedData;
+    }
     print(data);
     return data;
   } catch (error) {
@@ -223,6 +236,16 @@ function statusCard(label, value, tone) {
 
 function print(value) {
   output.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+}
+
+function formatDiscordPreview(data) {
+  return [
+    `${data.title || "Discord Message"} Preview`,
+    "",
+    data.preview || data.report || data.message || "",
+    "",
+    "Confirm to send this message to Discord.",
+  ].join("\n");
 }
 
 function addChatMessage(role, text) {

@@ -291,8 +291,12 @@ app.post("/discord/test-report", async (req, res) => {
   try {
     assertWebAuth(req);
     const message = String(req.body.message || "Eccentrix Timeline Manager test report.").trim();
+    if (!isConfirmedSend(req)) {
+      res.json(createDiscordPreviewResponse(message, "Test Report"));
+      return;
+    }
     await sendDiscordReport(message);
-    res.json({ ok: true, message });
+    res.json({ ok: true, sent: true, message });
   } catch (error) {
     sendHttpError(res, error);
   }
@@ -325,8 +329,13 @@ app.post("/daily-summary", async (req, res) => {
     assertWebAuth(req);
     const date = normalizeDate(req.body.date);
     const summaries = await createAllDailyReports(date);
-    await sendDiscordReport(formatDailyReportBatch(summaries));
-    res.json(summaries);
+    const report = formatDailyReportBatch(summaries);
+    if (!isConfirmedSend(req)) {
+      res.json({ ...createDiscordPreviewResponse(report, "Daily Summary"), summaries });
+      return;
+    }
+    await sendDiscordReport(report);
+    res.json({ ok: true, sent: true, summaries, report });
   } catch (error) {
     sendHttpError(res, error);
   }
@@ -337,8 +346,12 @@ app.post("/weekly-goal", async (req, res) => {
     assertWebAuth(req);
     const project = req.body.project ? resolveProject(req.body.project) : null;
     const result = await createWeeklyGoalReport(project?.key);
+    if (!isConfirmedSend(req)) {
+      res.json(createDiscordPreviewResponse(result, "Weekly Goal"));
+      return;
+    }
     await sendDiscordReport(result);
-    res.json({ report: result });
+    res.json({ ok: true, sent: true, report: result });
   } catch (error) {
     sendHttpError(res, error);
   }
@@ -370,8 +383,12 @@ app.post("/milestone", async (req, res) => {
   try {
     assertWebAuth(req);
     const result = await createMilestoneReport();
+    if (!isConfirmedSend(req)) {
+      res.json(createDiscordPreviewResponse(result, "Milestone"));
+      return;
+    }
     await sendDiscordReport(result);
-    res.json({ report: result });
+    res.json({ ok: true, sent: true, report: result });
   } catch (error) {
     sendHttpError(res, error);
   }
@@ -381,8 +398,12 @@ app.post("/timeline-analysis", async (req, res) => {
   try {
     assertWebAuth(req);
     const result = await createCurrentTimelineAnalysisReport();
+    if (!isConfirmedSend(req)) {
+      res.json(createDiscordPreviewResponse(result, "Timeline Analysis"));
+      return;
+    }
     await sendDiscordReport(result);
-    res.json({ report: result });
+    res.json({ ok: true, sent: true, report: result });
   } catch (error) {
     sendHttpError(res, error);
   }
@@ -640,10 +661,14 @@ async function handleAssistantChat(body) {
   if (actions.length === 0) {
     actions = inferAssistantActionsFromMessage(message, projectKey);
   }
-  const appliedActions = await executeAssistantActions(actions);
+  const appliedActions = await executeAssistantActions(actions, { confirmSend: isConfirmedSend({ body }) });
+  const discordPreview = appliedActions.find((action) => action.requiresConfirmation);
 
   return {
     ok: true,
+    ...(discordPreview
+      ? createDiscordPreviewResponse(discordPreview.preview, "AI Chat Discord Report")
+      : {}),
     reply: buildAssistantReply(parsed.reply, actions, appliedActions),
     contextSummary,
     visualProgressOverview: parsed.visualProgressOverview || null,
@@ -652,7 +677,7 @@ async function handleAssistantChat(body) {
   };
 }
 
-async function executeAssistantActions(actions) {
+async function executeAssistantActions(actions, options = {}) {
   const results = [];
 
   for (const action of actions.slice(0, 5)) {
@@ -723,6 +748,10 @@ async function executeAssistantActions(actions) {
     if (type === "send_discord_report") {
       const message = String(action.message || "").trim();
       if (!message) continue;
+      if (!options.confirmSend) {
+        results.push({ type, ok: false, requiresConfirmation: true, preview: message });
+        continue;
+      }
       await sendDiscordReport(message);
       results.push({ type, ok: true });
     }
@@ -1307,7 +1336,7 @@ async function createDailySummary(date = todayBangkok(), projectKey = "dynozoic"
   await ensureHeader(sheets, project, project.sheetName, SHEET_HEADERS);
 
   const rows = await readRows(sheets, project, project.sheetName, "A:L");
-  const dataRows = rows.slice(1).filter((row) => row[0] === date);
+  const dataRows = rows.slice(1).filter((row) => sheetDateMatches(row[0], date));
   const openFeedback = await getOpenFeedbackRows(sheets, project);
 
   if (dataRows.length === 0) {
@@ -2135,6 +2164,83 @@ function normalizeDate(value) {
   return date.toLocaleDateString("en-CA", { timeZone: "Asia/Bangkok" });
 }
 
+function sheetDateMatches(value, targetDate) {
+  const target = normalizeDate(targetDate);
+  return possibleSheetDates(value).has(target);
+}
+
+function possibleSheetDates(value) {
+  const input = String(value || "").trim();
+  const dates = new Set();
+  if (!input) return dates;
+
+  if (typeof value === "number" || /^\d+(\.\d+)?$/.test(input)) {
+    const serial = Number(value);
+    if (Number.isFinite(serial) && serial > 20000 && serial < 80000) {
+      const date = new Date(Date.UTC(1899, 11, 30) + serial * 24 * 60 * 60 * 1000);
+      dates.add(date.toLocaleDateString("en-CA", { timeZone: "UTC" }));
+    }
+  }
+
+  const iso = input.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (iso) {
+    dates.add(formatDateParts(normalizeCalendarYear(Number(iso[1])), Number(iso[2]), Number(iso[3])));
+  }
+
+  const slash = input.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})/);
+  if (slash) {
+    const first = Number(slash[1]);
+    const second = Number(slash[2]);
+    const year = normalizeCalendarYear(Number(slash[3]));
+    dates.add(formatDateParts(year, first, second));
+    dates.add(formatDateParts(year, second, first));
+  }
+
+  const thaiMonth = input.match(/(\d{1,2})\s+([ก-๙]+)\s+(\d{4})/);
+  if (thaiMonth) {
+    const month = THAI_MONTHS[thaiMonth[2]];
+    if (month) {
+      dates.add(formatDateParts(normalizeCalendarYear(Number(thaiMonth[3])), month, Number(thaiMonth[1])));
+    }
+  }
+
+  const parsed = new Date(input);
+  if (!Number.isNaN(parsed.getTime())) {
+    dates.add(parsed.toLocaleDateString("en-CA", { timeZone: "Asia/Bangkok" }));
+  }
+
+  return new Set([...dates].filter(Boolean));
+}
+
+const THAI_MONTHS = {
+  มกราคม: 1,
+  กุมภาพันธ์: 2,
+  มีนาคม: 3,
+  เมษายน: 4,
+  พฤษภาคม: 5,
+  มิถุนายน: 6,
+  กรกฎาคม: 7,
+  สิงหาคม: 8,
+  กันยายน: 9,
+  ตุลาคม: 10,
+  พฤศจิกายน: 11,
+  ธันวาคม: 12,
+};
+
+function normalizeCalendarYear(year) {
+  if (year < 100) return year + 2000;
+  return year > 2400 ? year - 543 : year;
+}
+
+function formatDateParts(year, month, day) {
+  if (!year || month < 1 || month > 12 || day < 1 || day > 31) return "";
+  return [
+    String(year).padStart(4, "0"),
+    String(month).padStart(2, "0"),
+    String(day).padStart(2, "0"),
+  ].join("-");
+}
+
 function todayBangkok() {
   return new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Bangkok" });
 }
@@ -2287,6 +2393,20 @@ function assertCronAuth(req) {
   const error = new Error("Unauthorized cron request");
   error.statusCode = 401;
   throw error;
+}
+
+function isConfirmedSend(req) {
+  return req.body?.confirm === true || req.body?.confirmed === true;
+}
+
+function createDiscordPreviewResponse(content, title) {
+  return {
+    ok: true,
+    sent: false,
+    requiresConfirmation: true,
+    title,
+    preview: String(content || "").trim(),
+  };
 }
 
 function createAdminStatus(req) {
@@ -2536,14 +2656,19 @@ function headersForSheet(project, sheetName) {
 }
 
 function isDateInCurrentBangkokWeek(value) {
-  const rowDate = new Date(`${value}T00:00:00+07:00`);
-  if (Number.isNaN(rowDate.getTime())) return false;
-
   const today = new Date(`${todayBangkok()}T00:00:00+07:00`);
   const day = today.getDay() || 7;
   const monday = new Date(today.getTime() - (day - 1) * 24 * 60 * 60 * 1000);
   const nextMonday = new Date(monday.getTime() + 7 * 24 * 60 * 60 * 1000);
-  return rowDate >= monday && rowDate < nextMonday;
+
+  for (const normalized of possibleSheetDates(value)) {
+    const rowDate = new Date(`${normalized}T00:00:00+07:00`);
+    if (!Number.isNaN(rowDate.getTime()) && rowDate >= monday && rowDate < nextMonday) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function formatDailyReportBatch(summaries) {

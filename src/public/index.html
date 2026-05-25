@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="th">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Eccentrix Timeline Manager</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Eccentrix</p>
+        <h1>Timeline Manager</h1>
+      </div>
+      <div class="auth-panel">
+        <label for="secretInput">WEB_FORM_SECRET</label>
+        <div class="secret-row">
+          <input id="secretInput" type="password" autocomplete="current-password" placeholder="ใส่ secret ถ้ามี">
+          <button id="saveSecretBtn" type="button">Save</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="shell">
+      <section class="status-grid" id="statusGrid" aria-live="polite"></section>
+
+      <nav class="tabs" aria-label="Dashboard sections">
+        <button class="tab is-active" type="button" data-panel="workPanel">Update</button>
+        <button class="tab" type="button" data-panel="feedbackPanel">Feedback</button>
+        <button class="tab" type="button" data-panel="planningPanel">Plan</button>
+        <button class="tab" type="button" data-panel="analysisPanel">Analyze</button>
+        <button class="tab" type="button" data-panel="botPanel">Bot</button>
+      </nav>
+
+      <section class="workspace">
+        <form class="panel is-active" id="workPanel" data-endpoint="/updates">
+          <div class="panel-head">
+            <h2>อัปเดตงาน</h2>
+            <button type="submit">Save Update</button>
+          </div>
+          <div class="form-grid">
+            <label>Project
+              <select name="project" required>
+                <option value="dynozoic">Dynozoic timeline</option>
+                <option value="eaa">Earth Atlantis Abyss</option>
+              </select>
+            </label>
+            <label>Name
+              <input name="developer" required placeholder="ชื่อคนอัปเดต">
+            </label>
+            <label>Date
+              <input name="date" type="date">
+            </label>
+            <label class="wide">Work update
+              <textarea name="text" required rows="7" placeholder="วันนี้ทำอะไร เสร็จอะไร ติดอะไร ต่อไปทำอะไร"></textarea>
+            </label>
+          </div>
+        </form>
+
+        <form class="panel" id="feedbackPanel" data-endpoint="/feedback">
+          <div class="panel-head">
+            <h2>Feedback</h2>
+            <button type="submit">Save Feedback</button>
+          </div>
+          <div class="form-grid">
+            <label>Project
+              <select name="project" required>
+                <option value="dynozoic">Dynozoic timeline</option>
+                <option value="eaa">Earth Atlantis Abyss</option>
+              </select>
+            </label>
+            <label>Name
+              <input name="developer" required placeholder="ชื่อผู้แจ้ง">
+            </label>
+            <label>Date
+              <input name="date" type="date">
+            </label>
+            <label class="wide">Feedback
+              <textarea name="text" required rows="7" placeholder="สิ่งที่ควรแก้ ปรับ หรือเก็บไว้พิจารณา"></textarea>
+            </label>
+          </div>
+        </form>
+
+        <section class="panel" id="planningPanel">
+          <div class="panel-head">
+            <h2>Weekly Plan</h2>
+          </div>
+          <form class="stack" id="weeklyTargetForm" data-endpoint="/weekly-target">
+            <div class="form-grid">
+              <label>Project
+                <select name="project" required>
+                  <option value="dynozoic">Dynozoic timeline</option>
+                  <option value="eaa">Earth Atlantis Abyss</option>
+                </select>
+              </label>
+              <label>Owner
+                <input name="owner" required placeholder="ทีน">
+              </label>
+              <label>Week start
+                <input name="weekStart" type="date">
+              </label>
+              <label class="wide">Target
+                <textarea name="target" required rows="5" placeholder="เป้าหมายหลักของสัปดาห์นี้"></textarea>
+              </label>
+            </div>
+            <button type="submit">Set Weekly Target</button>
+          </form>
+
+          <form class="inline-action" id="weeklyPlanForm" data-endpoint="/weekly-plan">
+            <select name="project">
+              <option value="">Both projects</option>
+              <option value="dynozoic">Dynozoic timeline</option>
+              <option value="eaa">Earth Atlantis Abyss</option>
+            </select>
+            <input name="weekStart" type="date">
+            <button type="submit">Generate Plan</button>
+          </form>
+        </section>
+
+        <section class="panel" id="analysisPanel">
+          <div class="panel-head">
+            <h2>AI Analysis</h2>
+          </div>
+          <div class="action-grid">
+            <button type="button" data-action="/timeline-analysis">Analyze Timeline</button>
+            <button type="button" data-action="/milestone">Milestone</button>
+            <button type="button" data-action="/weekly-goal">Weekly Gold</button>
+          </div>
+          <form class="inline-action" id="dailySummaryForm" data-endpoint="/daily-summary">
+            <input name="date" type="date">
+            <button type="submit">Daily Summary</button>
+          </form>
+        </section>
+
+        <section class="panel" id="botPanel">
+          <div class="panel-head">
+            <h2>Discord Bot</h2>
+          </div>
+          <div class="bot-layout">
+            <div class="bot-box">
+              <h3>Webhook endpoint</h3>
+              <div class="copy-row">
+                <input id="interactionEndpoint" readonly>
+                <button id="copyEndpointBtn" type="button">Copy</button>
+              </div>
+            </div>
+            <div class="bot-box">
+              <h3>Commands</h3>
+              <button id="registerCommandsBtn" type="button">Register Slash Commands</button>
+            </div>
+            <form class="bot-box" id="testReportForm" data-endpoint="/discord/test-report">
+              <h3>Report channel</h3>
+              <textarea name="message" rows="4">Eccentrix Timeline Manager test report.</textarea>
+              <button type="submit">Send Test Report</button>
+            </form>
+          </div>
+        </section>
+      </section>
+
+      <section class="output-panel">
+        <div class="panel-head">
+          <h2>Result</h2>
+          <button id="clearOutputBtn" type="button">Clear</button>
+        </div>
+        <pre id="output">พร้อมใช้งาน</pre>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

@@ -1,6 +1,7 @@
 require("dotenv").config();
 
 const crypto = require("crypto");
+const path = require("path");
 const express = require("express");
 const { google } = require("googleapis");
 const OpenAI = require("openai");
@@ -190,9 +191,23 @@ app.use(
 );
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
+app.use(express.static(path.join(__dirname, "public")));
+
+app.get("/", (_req, res) => {
+  res.sendFile(path.join(__dirname, "public", "index.html"));
+});
 
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
+});
+
+app.get("/admin/status", (req, res) => {
+  try {
+    assertWebAuth(req);
+    res.json(createAdminStatus(req));
+  } catch (error) {
+    sendHttpError(res, error);
+  }
 });
 
 app.post("/discord/interactions", (req, res) => {
@@ -243,6 +258,17 @@ app.post("/discord/register-commands", async (req, res) => {
     assertWebAuth(req);
     await registerSlashCommands();
     res.json({ ok: true });
+  } catch (error) {
+    sendHttpError(res, error);
+  }
+});
+
+app.post("/discord/test-report", async (req, res) => {
+  try {
+    assertWebAuth(req);
+    const message = String(req.body.message || "Eccentrix Timeline Manager test report.").trim();
+    await sendDiscordReport(message);
+    res.json({ ok: true, message });
   } catch (error) {
     sendHttpError(res, error);
   }
@@ -1595,6 +1621,63 @@ function assertCronAuth(req) {
   const error = new Error("Unauthorized cron request");
   error.statusCode = 401;
   throw error;
+}
+
+function createAdminStatus(req) {
+  const origin = `${req.protocol}://${req.get("host")}`;
+  return {
+    ok: true,
+    app: "Eccentrix Timeline Manager",
+    date: todayBangkok(),
+    dailyReportTime: env.dailyReportTime,
+    auth: {
+      webFormSecretEnabled: Boolean(env.webFormSecret),
+      cronSecretEnabled: Boolean(env.cronSecret),
+    },
+    ai: {
+      grokConfigured: Boolean(env.grokApiKey),
+      model: env.grokModel,
+    },
+    google: {
+      serviceAccountConfigured: Boolean(env.googleServiceAccountEmail && env.googlePrivateKey),
+      dynozoicSheetConfigured: Boolean(PROJECTS.dynozoic.spreadsheetId),
+      eaaSheetConfigured: Boolean(PROJECTS.eaa.spreadsheetId),
+      sheetTabs: {
+        dynozoic: {
+          timeline: PROJECTS.dynozoic.sheetName,
+          feedback: PROJECTS.dynozoic.feedbackSheetName,
+          targets: PROJECTS.dynozoic.targetSheetName,
+          plan: PROJECTS.dynozoic.planSheetName,
+        },
+        eaa: {
+          timeline: PROJECTS.eaa.sheetName,
+          feedback: PROJECTS.eaa.feedbackSheetName,
+          targets: PROJECTS.eaa.targetSheetName,
+          plan: PROJECTS.eaa.planSheetName,
+        },
+      },
+    },
+    discord: {
+      tokenConfigured: Boolean(env.discordToken),
+      clientIdConfigured: Boolean(env.discordClientId),
+      publicKeyConfigured: Boolean(env.discordPublicKey),
+      guildIdConfigured: Boolean(env.discordGuildId),
+      updateChannelConfigured: Boolean(env.discordUpdateChannelId),
+      reportChannelConfigured: Boolean(env.discordReportChannelId),
+      gatewayEnabled: env.enableDiscordBot,
+      interactionEndpoint: `${origin}/discord/interactions`,
+    },
+    endpoints: {
+      health: "/health",
+      updates: "/updates",
+      feedback: "/feedback",
+      weeklyTarget: "/weekly-target",
+      weeklyPlan: "/weekly-plan",
+      timelineAnalysis: "/timeline-analysis",
+      registerCommands: "/discord/register-commands",
+      testReport: "/discord/test-report",
+    },
+  };
 }
 
 function verifyDiscordRequest(req) {

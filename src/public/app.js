@@ -437,8 +437,10 @@ function formatDailyTaskSummary(data) {
   const analysis = data.timelineAnalysis || {};
   const risks = asTextList(analysis.deadlineRisks).slice(0, 3).join(" | ");
   const blocked = asTextList(analysis.blockedOrLateWork).slice(0, 3).join(" | ");
+  const signals = formatSignalCounts(data.scheduleSignals);
   return [
     data.summary || "Review today's tasks, carry-over work, and advance suggestions.",
+    signals,
     risks ? `Deadline risks: ${risks}` : "",
     blocked ? `Blocked/late: ${blocked}` : "",
   ].filter(Boolean).join(" ");
@@ -490,11 +492,25 @@ function renderMilestoneProject(project) {
 function formatMilestoneSummary(data) {
   const concerns = asTextList(data.concerns).slice(0, 3).join(" | ");
   const smooth = asTextList(data.smoothAreas).slice(0, 3).join(" | ");
+  const signals = formatSignalCounts(data.scheduleSignals);
   return [
     data.summary || "Full timeline milestone review for both projects.",
+    signals,
     concerns ? `Worry: ${concerns}` : "",
     smooth ? `Smooth: ${smooth}` : "",
   ].filter(Boolean).join(" ");
+}
+
+function formatSignalCounts(scheduleSignals) {
+  const signals = Array.isArray(scheduleSignals) ? scheduleSignals : [];
+  if (!signals.length) return "";
+  const totals = signals.reduce((total, item) => ({
+    overdue: total.overdue + (item.overdue?.length || 0),
+    dueSoon: total.dueSoon + (item.dueSoon?.length || 0),
+    blocked: total.blocked + (item.blocked?.length || 0),
+    lowProgressDeadline: total.lowProgressDeadline + (item.lowProgressDeadline?.length || 0),
+  }), { overdue: 0, dueSoon: 0, blocked: 0, lowProgressDeadline: 0 });
+  return `Detected: overdue ${totals.overdue}, due soon ${totals.dueSoon}, blocked ${totals.blocked}, low progress near deadline ${totals.lowProgressDeadline}.`;
 }
 
 function renderMiniList(label, values) {

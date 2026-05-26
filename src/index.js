@@ -44,6 +44,20 @@ const SHEET_HEADERS = [
   "Created At",
 ];
 
+const TIMELINE_HEADERS = [
+  "ID",
+  "Rock",
+  "Priority",
+  "Task",
+  "Start",
+  "End",
+  "Blockers",
+  "Percent",
+  "Response",
+  "Sub Response",
+  "Status&LateDay",
+];
+
 const FEEDBACK_HEADERS = [
   "Date",
   "Developer",
@@ -83,17 +97,24 @@ const PLAN_HEADERS = [
 ];
 
 const TIMELINE_EDIT_FIELDS = {
-  completed: { header: "Completed", column: "E" },
-  "completed tasks": { header: "Completed", column: "E" },
-  inprogress: { header: "In Progress", column: "F" },
-  "in progress": { header: "In Progress", column: "F" },
+  id: { header: "ID", column: "A" },
+  rock: { header: "Rock", column: "B" },
+  priority: { header: "Priority", column: "C" },
+  task: { header: "Task", column: "D" },
+  start: { header: "Start", column: "E" },
+  end: { header: "End", column: "F" },
+  deadline: { header: "End", column: "F" },
   blockers: { header: "Blockers", column: "G" },
   blocker: { header: "Blockers", column: "G" },
   blocked: { header: "Blockers", column: "G" },
-  "next steps": { header: "Next Steps", column: "H" },
-  nextsteps: { header: "Next Steps", column: "H" },
-  tags: { header: "Tags", column: "I" },
-  confidence: { header: "Confidence", column: "J" },
+  percent: { header: "Percent", column: "H" },
+  progress: { header: "Percent", column: "H" },
+  response: { header: "Response", column: "I" },
+  subresponse: { header: "Sub Response", column: "J" },
+  "sub response": { header: "Sub Response", column: "J" },
+  status: { header: "Status&LateDay", column: "K" },
+  lateday: { header: "Status&LateDay", column: "K" },
+  "status&lateday": { header: "Status&LateDay", column: "K" },
 };
 
 const TEAM_MEMBERS = [
@@ -536,7 +557,7 @@ async function handleDeveloperUpdate(update) {
   update.project = project.key;
 
   const sheets = await getSheetsClient();
-  await ensureHeader(sheets, project, project.sheetName, SHEET_HEADERS);
+  await ensureHeader(sheets, project, project.sheetName, TIMELINE_HEADERS);
   await appendTimelineRow(sheets, project, update, analysis);
 
   return {
@@ -564,9 +585,9 @@ async function handleAssistantTimelineUpdate(update) {
   update.project = project.key;
 
   const sheets = await getSheetsClient();
-  await ensureHeader(sheets, project, project.sheetName, SHEET_HEADERS);
+  await ensureHeader(sheets, project, project.sheetName, TIMELINE_HEADERS);
 
-  const rows = await readRows(sheets, project, project.sheetName, "A:L");
+  const rows = await readRows(sheets, project, project.sheetName, "A:K");
   const existingRows = rows
     .slice(1)
     .map((row, index) => ({ row, rowNumber: index + 2 }))
@@ -714,8 +735,8 @@ async function handleAssistantChat(body) {
           "For save_feedback use fields: project, developer, text, date.",
           "For set_weekly_target use fields: project, owner, target, weekStart.",
           "For generate_weekly_plan use fields: project, weekStart. project may be empty for both projects.",
-          "For update_timeline_field use fields: project, field, value, scope. Allowed fields: completed, inProgress, blockers, nextSteps, tags, confidence. scope can be all or meaningful_rows. project may be empty for both projects.",
-          "For patch_sheet_cells use fields: project, sheet, updates. sheet can be timeline, feedback, targets, or plan. updates is an array of { rowNumber, field, value }. rowNumber is the Google Sheet row number provided in context rows. field must match an existing header or supported alias.",
+          "For update_timeline_field use fields: project, field, value, scope. Allowed timeline fields: ID, Rock, Priority, Task, Start, End, Blockers, Percent, Response, Sub Response, Status&LateDay. scope can be all or meaningful_rows. project may be empty for both projects.",
+          "For patch_sheet_cells use fields: project, sheet, updates. sheet can be timeline, feedback, targets, or plan. updates is an array of { rowNumber, field, value }. rowNumber is the Google Sheet row number provided in context rows. timeline field must be one of ID, Rock, Priority, Task, Start, End, Blockers, Percent, Response, Sub Response, Status&LateDay.",
           "Use patch_sheet_cells when you need to edit many specific timeline rows after analyzing the full sheet context. Keep updates focused and do not edit Date, Source, or Created At unless the user explicitly asks.",
           "For send_discord_report use field: message.",
           "Never claim Google Sheets were edited unless you include the exact edit action in actions. If you only analyzed data, say that no sheet edit was performed.",
@@ -768,7 +789,7 @@ async function createDailyTaskBoard(date = todayBangkok()) {
   const contexts = [];
 
   for (const project of Object.values(PROJECTS)) {
-    contexts.push(await buildFullDailyTaskContext(sheets, project, weekStart));
+    contexts.push(await buildFullDailyTaskContext(sheets, project, weekStart, date));
   }
 
   const response = await grok.chat.completions.create({
@@ -781,11 +802,15 @@ async function createDailyTaskBoard(date = todayBangkok()) {
         content: [
           PM_ASSISTANT_SYSTEM_PROMPT,
           "Create a daily work board for a small game team every morning at 06:00 Bangkok time.",
+          "The timeline sheet header schema is fixed and must be interpreted exactly as: ID, Rock, Priority, Task, Start, End, Blockers, Percent, Response, Sub Response, Status&LateDay.",
+          "Never ask to edit, rename, insert, delete, or overwrite these headers.",
           "You must inspect 100% of the provided fullTimeline rows for both projects before assigning tasks.",
           "Do not rely only on recent rows. Use rowCounts to confirm timelineSentToAi equals meaningfulTimeline for each project.",
+          "scheduleSignals is precomputed by the backend from the full timeline. Overdue, dueSoon, activeWindow, blocked, and lowProgressDeadline rows must be considered high priority evidence.",
           "First analyze project problems, blockers, stale work, dependencies, owner workload, dates, time pressure, and deadline risk from every available timeline column.",
-          "Treat columns named Date, Deadline, Due Date, End Date, Target Date, Time, Duration, Status, Progress, Percent, Blockers, Next Steps, Priority, Assignee, Owner, Developer, or similar as schedule signals.",
-          "Generate daily tasks only after that analysis. Today tasks must be tied to deadline pressure, carry-over risk, blockers, or current plan priorities.",
+          "Use Start as the planned start date, End as the deadline/end date, Percent as completion percentage, Blockers as blocking issues, Priority as urgency, Task as the work item, Response/Sub Response as owner or response context, and Status&LateDay as late/status signal.",
+          "Generate daily tasks only after that analysis. Today tasks must be tied to deadline pressure, carry-over risk, blockers, scheduleSignals, or current plan priorities.",
+          "If scheduleSignals has overdue or dueSoon rows, include them in todayTasks or carryOverTasks unless they are clearly complete.",
           "Return only valid JSON with keys: headline, summary, timelineAnalysis, people.",
           "timelineAnalysis has projectFindings, deadlineRisks, blockedOrLateWork, workloadNotes, assumptions.",
           "people is an array for every active team member. Each person has member, role, focus, todayTasks, carryOverTasks, advanceTasks, risks.",
@@ -806,6 +831,7 @@ async function createDailyTaskBoard(date = todayBangkok()) {
           team: teamPromptData(),
           projects: contexts,
           contextSummary: summarizeProjectContexts(contexts),
+          scheduleSignals: contexts.map((context) => context.scheduleSignals),
         }),
       },
     ],
@@ -825,6 +851,7 @@ async function createDailyTaskBoard(date = todayBangkok()) {
     timelineAnalysis: parsed.timelineAnalysis || null,
     people,
     contextSummary: summarizeProjectContexts(contexts),
+    scheduleSignals: contexts.map((context) => context.scheduleSignals),
   };
 
   dailyTaskCache.set(date, result);
@@ -867,7 +894,8 @@ async function handleDailyTaskSubmission(body) {
           "Supported actions: patch_sheet_cells and save_update.",
           "Prefer patch_sheet_cells when the submitted item has a valid project and timelineRowNumber.",
           "For patch_sheet_cells use project, sheet='timeline', updates with rowNumber, field, value.",
-          "Useful timeline fields are Summary, Completed, In Progress, Blockers, Next Steps, Tags, Confidence.",
+          "Timeline headers are fixed: ID, Rock, Priority, Task, Start, End, Blockers, Percent, Response, Sub Response, Status&LateDay.",
+          "Never edit row 1 or any timeline header. Useful editable timeline fields are Blockers, Percent, Response, Sub Response, and Status&LateDay.",
           "Use save_update when progress cannot be mapped to an existing row.",
           "Keep updates concise. Preserve Thai wording from the submission when writing to sheets.",
         ].join("\n"),
@@ -910,7 +938,7 @@ async function createMilestoneReview(date = todayBangkok()) {
   const contexts = [];
 
   for (const project of Object.values(PROJECTS)) {
-    contexts.push(await buildFullDailyTaskContext(sheets, project, weekStart));
+    contexts.push(await buildFullDailyTaskContext(sheets, project, weekStart, date));
   }
 
   const response = await grok.chat.completions.create({
@@ -923,8 +951,11 @@ async function createMilestoneReview(date = todayBangkok()) {
         content: [
           PM_ASSISTANT_SYSTEM_PROMPT,
           "Create a milestone review for both game projects at the same 06:00 Bangkok morning review time as Daily Tasks.",
+          "The timeline sheet header schema is fixed and must be interpreted exactly as: ID, Rock, Priority, Task, Start, End, Blockers, Percent, Response, Sub Response, Status&LateDay.",
+          "Never ask to edit, rename, insert, delete, or overwrite these headers.",
           "You must inspect 100% of each project's provided fullTimeline rows before estimating milestone progress.",
-          "Use every available timeline column, including date, deadline, due date, milestone, task, status, progress, percent, blocker, dependency, priority, owner, and next steps fields.",
+          "scheduleSignals is precomputed by the backend from the full timeline. Use it to identify late, due soon, blocked, low progress, and currently scheduled milestone work.",
+          "Use Start as the planned start date, End as the deadline/end date, Percent as completion percentage, Blockers as blocking issues, Priority as urgency, Task as the work item, Rock as milestone/rock grouping, Response/Sub Response as owner or response context, and Status&LateDay as late/status signal.",
           "Analyze current milestone progress, actual completion percentage, schedule pressure, deadline risk, blockers, smooth areas, and next recommendations.",
           "Do not claim a percentage without explaining the evidence used from the timeline.",
           "Return only valid JSON with keys: headline, summary, overallPercent, projects, concerns, smoothAreas, recommendations.",
@@ -943,6 +974,7 @@ async function createMilestoneReview(date = todayBangkok()) {
           team: teamPromptData(),
           projects: contexts,
           contextSummary: summarizeProjectContexts(contexts),
+          scheduleSignals: contexts.map((context) => context.scheduleSignals),
         }),
       },
     ],
@@ -965,6 +997,7 @@ async function createMilestoneReview(date = todayBangkok()) {
     smoothAreas: asArray(parsed.smoothAreas),
     recommendations: asArray(parsed.recommendations),
     contextSummary: summarizeProjectContexts(contexts),
+    scheduleSignals: contexts.map((context) => context.scheduleSignals),
   };
 
   milestoneReviewCache.set(date, result);
@@ -1069,8 +1102,8 @@ async function updateTimelineFieldFromAction(action) {
   }
 
   for (const project of targetProjects) {
-    await ensureHeader(sheets, project, project.sheetName, SHEET_HEADERS);
-    const rows = await readRows(sheets, project, project.sheetName, "A:L");
+    await ensureHeader(sheets, project, project.sheetName, TIMELINE_HEADERS);
+    const rows = await readRows(sheets, project, project.sheetName, "A:K");
     const rowIndexes = rows
       .slice(1)
       .map((row, index) => ({ row, sheetRow: index + 2 }))
@@ -1144,6 +1177,7 @@ function normalizeSheetCellPatch(update, sheetInfo) {
   const field = resolveSheetField(sheetInfo.headers, update.field || update.column || update.header);
 
   if (!Number.isInteger(rowNumber) || rowNumber < 2 || !field) return null;
+  if (sheetInfo.headers === TIMELINE_HEADERS && !TIMELINE_HEADERS.includes(field.header)) return null;
 
   return {
     rowNumber,
@@ -1155,21 +1189,22 @@ function normalizeSheetCellPatch(update, sheetInfo) {
 
 function normalizeTimelinePatchUpdates(updates) {
   const allowedFields = new Set([
-    "Date",
-    "Developer",
-    "Raw Update",
-    "Summary",
-    "Completed",
-    "In Progress",
+    "ID",
+    "Rock",
+    "Priority",
+    "Task",
+    "Start",
+    "End",
     "Blockers",
-    "Next Steps",
-    "Tags",
-    "Confidence",
+    "Percent",
+    "Response",
+    "Sub Response",
+    "Status&LateDay",
   ]);
 
   return (Array.isArray(updates) ? updates : [])
     .map((update) => {
-      const field = resolveSheetField(SHEET_HEADERS, update.field || update.column || update.header);
+      const field = resolveSheetField(TIMELINE_HEADERS, update.field || update.column || update.header);
       const rowNumber = Number(update.rowNumber || update.row || update.sheetRow);
       if (!Number.isInteger(rowNumber) || rowNumber < 2 || !field || !allowedFields.has(field.header)) {
         return null;
@@ -1227,16 +1262,17 @@ function inferTimelinePatchRowNumber(decision, existingRows, update, analysis) {
 
 function buildDefaultTimelinePatchUpdates(rowNumber, update, analysis) {
   return [
-    { rowNumber, field: "Date", value: update.date },
-    { rowNumber, field: "Developer", value: update.developer },
-    { rowNumber, field: "Raw Update", value: update.text },
-    { rowNumber, field: "Summary", value: analysis.summary },
-    { rowNumber, field: "Completed", value: analysis.completed.join("\n") },
-    { rowNumber, field: "In Progress", value: analysis.inProgress.join("\n") },
+    { rowNumber, field: "Task", value: analysis.summary || update.text },
+    { rowNumber, field: "Start", value: update.date },
     { rowNumber, field: "Blockers", value: analysis.blockers.join("\n") },
-    { rowNumber, field: "Next Steps", value: analysis.nextSteps.join("\n") },
-    { rowNumber, field: "Tags", value: analysis.tags.join(", ") },
-    { rowNumber, field: "Confidence", value: analysis.confidence },
+    { rowNumber, field: "Response", value: update.developer },
+    { rowNumber, field: "Sub Response", value: [
+      update.text,
+      analysis.completed.length ? `Completed: ${analysis.completed.join("; ")}` : "",
+      analysis.inProgress.length ? `In Progress: ${analysis.inProgress.join("; ")}` : "",
+      analysis.nextSteps.length ? `Next: ${analysis.nextSteps.join("; ")}` : "",
+    ].filter(Boolean).join("\n") },
+    { rowNumber, field: "Status&LateDay", value: analysis.tags.join(", ") || update.source || "" },
   ];
 }
 
@@ -1249,8 +1285,8 @@ function tokenizeForTimelineMatch(value) {
 function resolveEditableSheet(project, value) {
   const key = String(value || "").trim().toLowerCase();
   const sheets = {
-    timeline: { sheetName: project.sheetName, headers: SHEET_HEADERS },
-    main: { sheetName: project.sheetName, headers: SHEET_HEADERS },
+    timeline: { sheetName: project.sheetName, headers: TIMELINE_HEADERS },
+    main: { sheetName: project.sheetName, headers: TIMELINE_HEADERS },
     feedback: { sheetName: project.feedbackSheetName, headers: FEEDBACK_HEADERS },
     targets: { sheetName: project.targetSheetName, headers: TARGET_HEADERS },
     weeklytargets: { sheetName: project.targetSheetName, headers: TARGET_HEADERS },
@@ -1268,19 +1304,23 @@ function resolveSheetField(headers, value) {
   if (!input) return null;
 
   const aliases = {
-    rawupdate: "Raw Update",
-    update: "Raw Update",
-    message: "Raw Update",
-    inprogress: "In Progress",
-    progress: "In Progress",
+    rawupdate: "Task",
+    update: "Task",
+    message: "Task",
+    inprogress: "Status&LateDay",
+    progress: "Percent",
+    percent: "Percent",
     blockers: "Blockers",
     blocker: "Blockers",
-    nextsteps: "Next Steps",
-    next: "Next Steps",
+    nextsteps: "Sub Response",
+    next: "Sub Response",
+    response: "Response",
+    subresponse: "Sub Response",
+    status: "Status&LateDay",
+    late: "Status&LateDay",
     createdat: "Created At",
     weeklytarget: "AI Refined Target",
     target: "AI Refined Target",
-    status: "Status",
     task: "Task",
     priority: "Priority",
   };
@@ -1378,8 +1418,18 @@ function summarizeProjectContexts(contexts) {
     weekStart: context.weekStart,
     timelineTotalCount: context.rowCounts.timeline,
     timelineMeaningfulCount: context.rowCounts.meaningfulTimeline,
+    timelineSentToAi: context.rowCounts.timelineSentToAi,
     timelineContextLimit: context.rowCounts.timelineContextLimit,
+    fullTimelineCount: context.fullTimeline?.length || 0,
     recentTimelineCount: context.recentTimeline.length,
+    scheduleSignalCount: context.scheduleSignals
+      ? context.scheduleSignals.overdue.length
+        + context.scheduleSignals.dueSoon.length
+        + context.scheduleSignals.activeWindow.length
+        + context.scheduleSignals.blocked.length
+        + context.scheduleSignals.lowProgressDeadline.length
+      : 0,
+    timelineHeaderMatchesExpected: context.timelineHeaderMatchesExpected ?? null,
     feedbackTotalCount: context.rowCounts.feedback,
     openFeedbackCount: context.openFeedback.length,
     weeklyTargetTotalCount: context.rowCounts.weeklyTargets,
@@ -1457,8 +1507,8 @@ async function decideTimelineUpdateTargetWithGrok(project, update, analysis, exi
           "Return only valid JSON with keys: mode, reason, updates.",
           "mode must be patch or append.",
           "updates is an array of { rowNumber, field, value } using rowNumber from existingRows.",
-          "Allowed fields: Date, Developer, Raw Update, Summary, Completed, In Progress, Blockers, Next Steps, Tags, Confidence.",
-          "Never edit Source or Created At. Keep Thai when the input is Thai.",
+          "Allowed timeline fields: ID, Rock, Priority, Task, Start, End, Blockers, Percent, Response, Sub Response, Status&LateDay.",
+          "Never edit row 1 or any header. Keep Thai when the input is Thai.",
         ].join("\n"),
       },
       {
@@ -1627,9 +1677,9 @@ async function createDailySummary(date = todayBangkok(), projectKey = "dynozoic"
 
   const project = resolveProject(projectKey);
   const sheets = await getSheetsClient();
-  await ensureHeader(sheets, project, project.sheetName, SHEET_HEADERS);
+    await ensureHeader(sheets, project, project.sheetName, TIMELINE_HEADERS);
 
-  const rows = await readRows(sheets, project, project.sheetName, "A:L");
+  const rows = await readRows(sheets, project, project.sheetName, "A:K");
   const dataRows = rows.slice(1).filter((row) => sheetDateMatches(row[0], date));
   const openFeedback = await getOpenFeedbackRows(sheets, project);
 
@@ -1824,24 +1874,29 @@ async function createCurrentTimelineAnalysisReport() {
 async function appendTimelineRow(sheets, project, update, analysis) {
   const values = [
     [
+      `${update.date}-${Date.now()}`,
+      project.label,
+      "Medium",
+      analysis.summary || update.text,
       update.date,
-      update.developer,
-      update.text,
-      analysis.summary,
-      analysis.completed.join("\n"),
-      analysis.inProgress.join("\n"),
+      "",
       analysis.blockers.join("\n"),
-      analysis.nextSteps.join("\n"),
-      analysis.tags.join(", "),
-      analysis.confidence,
-      update.source,
-      new Date().toISOString(),
+      "",
+      update.developer,
+      [
+        update.text,
+        analysis.completed.length ? `Completed: ${analysis.completed.join("; ")}` : "",
+        analysis.inProgress.length ? `In Progress: ${analysis.inProgress.join("; ")}` : "",
+        analysis.nextSteps.length ? `Next: ${analysis.nextSteps.join("; ")}` : "",
+        analysis.tags.length ? `Tags: ${analysis.tags.join(", ")}` : "",
+      ].filter(Boolean).join("\n"),
+      update.source || "web",
     ],
   ];
 
   await sheets.spreadsheets.values.append({
     spreadsheetId: project.spreadsheetId,
-    range: `${quoteSheet(project.sheetName)}!A:L`,
+    range: `${quoteSheet(project.sheetName)}!A:K`,
     valueInputOption: "USER_ENTERED",
     insertDataOption: "INSERT_ROWS",
     requestBody: { values },
@@ -1935,6 +1990,12 @@ async function ensureHeader(sheets, project, sheetName, headers) {
   const hasHeader = headers.every((header, index) => current[index] === header);
   if (hasHeader) return;
 
+  if (current.some((value) => String(value || "").trim())) {
+    const error = new Error(`Header mismatch in ${project.label} / ${sheetName}. Existing headers will not be overwritten.`);
+    error.statusCode = 500;
+    throw error;
+  }
+
   await sheets.spreadsheets.values.update({
     spreadsheetId: project.spreadsheetId,
     range,
@@ -1987,8 +2048,16 @@ async function readRows(sheets, project, sheetName, columns) {
   return response.data.values || [];
 }
 
+async function readRowsRaw(sheets, project, sheetName, columns) {
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: project.spreadsheetId,
+    range: `${quoteSheet(sheetName)}!${columns}`,
+  });
+  return response.data.values || [];
+}
+
 async function buildProjectManagementContext(sheets, project, weekStart) {
-  const timelineRows = await readRows(sheets, project, project.sheetName, "A:L");
+  const timelineRows = await readRows(sheets, project, project.sheetName, "A:K");
   const feedbackRows = await readRows(sheets, project, project.feedbackSheetName, "A:I");
   const targetRows = await readRows(sheets, project, project.targetSheetName, "A:I");
   const planRows = await readRows(sheets, project, project.planSheetName, "A:K");
@@ -2031,16 +2100,19 @@ async function buildProjectManagementContext(sheets, project, weekStart) {
   };
 }
 
-async function buildFullDailyTaskContext(sheets, project, weekStart) {
-  const timelineRows = await readRows(sheets, project, project.sheetName, "A:Z");
+async function buildFullDailyTaskContext(sheets, project, weekStart, reviewDate = todayBangkok()) {
+  const timelineRows = await readRowsRaw(sheets, project, project.sheetName, "A:K");
   const feedbackRows = await readRows(sheets, project, project.feedbackSheetName, "A:I");
   const targetRows = await readRows(sheets, project, project.targetSheetName, "A:I");
   const planRows = await readRows(sheets, project, project.planSheetName, "A:K");
-  const timelineHeaders = normalizeSheetHeaders(timelineRows[0] || SHEET_HEADERS);
+  const actualTimelineHeaders = normalizeSheetHeaders(timelineRows[0] || []);
+  const timelineHeaders = normalizeTimelineHeaders(timelineRows[0] || TIMELINE_HEADERS);
   const timelineDataRows = timelineRows.slice(1);
   const meaningfulTimelineRows = timelineDataRows
     .map((row, index) => ({ row, rowNumber: index + 2 }))
-    .filter((item) => isMeaningfulTimelineRow(item.row));
+    .filter((item) => isMeaningfulSheetRow(item.row));
+  const fullTimeline = meaningfulTimelineRows.map((item) => sheetRowToObject(timelineHeaders, item.row, item.rowNumber));
+  const scheduleSignals = buildScheduleSignals(project, fullTimeline, reviewDate);
 
   return {
     project: project.label,
@@ -2057,7 +2129,11 @@ async function buildFullDailyTaskContext(sheets, project, weekStart) {
       weeklyPlan: Math.max(0, planRows.length - 1),
     },
     timelineHeaders,
-    fullTimeline: meaningfulTimelineRows.map((item) => sheetRowToObject(timelineHeaders, item.row, item.rowNumber)),
+    actualTimelineHeaders,
+    expectedTimelineHeaders: TIMELINE_HEADERS,
+    timelineHeaderMatchesExpected: TIMELINE_HEADERS.every((header, index) => actualTimelineHeaders[index] === header),
+    fullTimeline,
+    scheduleSignals,
     recentTimeline: meaningfulTimelineRows.slice(-10).map((item) => timelineRowToObject(item)),
     openFeedback: feedbackRows
       .slice(1)
@@ -2091,6 +2167,10 @@ function normalizeSheetHeaders(headers) {
   return headers.map((header, index) => String(header || `Column ${columnLetter(index + 1)}`).trim());
 }
 
+function normalizeTimelineHeaders(headers) {
+  return TIMELINE_HEADERS.slice(0, headers.length || TIMELINE_HEADERS.length);
+}
+
 function sheetRowToObject(headers, row, rowNumber) {
   const fields = {};
   headers.forEach((header, index) => {
@@ -2105,9 +2185,129 @@ function sheetRowToObject(headers, row, rowNumber) {
   };
 }
 
+function buildScheduleSignals(project, fullTimeline, reviewDate) {
+  const today = normalizeDate(reviewDate);
+  const todayTime = new Date(`${today}T00:00:00+07:00`).getTime();
+  const soonTime = todayTime + 3 * 24 * 60 * 60 * 1000;
+  const signals = {
+    project: project.label,
+    projectKey: project.key,
+    reviewDate: today,
+    overdue: [],
+    dueSoon: [],
+    activeWindow: [],
+    blocked: [],
+    lowProgressDeadline: [],
+  };
+
+  for (const row of fullTimeline) {
+    const analysis = analyzeTimelineScheduleRow(row, todayTime, soonTime);
+    if (analysis.isComplete) continue;
+
+    const item = {
+      rowNumber: row.rowNumber,
+      title: analysis.title,
+      owner: analysis.owner,
+      status: analysis.status,
+      percent: analysis.percent,
+      dates: analysis.dates,
+      deadlineDates: analysis.deadlineDates,
+      blockers: analysis.blockers,
+    };
+
+    if (analysis.blockers) signals.blocked.push(item);
+    if (analysis.isOverdue) signals.overdue.push(item);
+    if (analysis.isDueSoon) signals.dueSoon.push(item);
+    if (analysis.isActiveWindow) signals.activeWindow.push(item);
+    if ((analysis.isOverdue || analysis.isDueSoon) && analysis.percent < 80) {
+      signals.lowProgressDeadline.push(item);
+    }
+  }
+
+  for (const key of ["overdue", "dueSoon", "activeWindow", "blocked", "lowProgressDeadline"]) {
+    signals[key] = signals[key].slice(0, 30);
+  }
+
+  return signals;
+}
+
+function analyzeTimelineScheduleRow(row, todayTime, soonTime) {
+  const entries = Object.entries(row.fields || {});
+  const text = entries.map(([header, value]) => `${header}: ${value}`).join(" | ");
+  const lowerText = text.toLowerCase();
+  const dates = [];
+  const deadlineDates = [];
+
+  for (const [header, value] of entries) {
+    const headerText = String(header || "").toLowerCase();
+    const normalizedDates = [...possibleSheetDates(value)];
+    if (normalizedDates.length === 0) continue;
+
+    const isDeadlineField = /deadline|due|end|target|finish|milestone|กำหนด|เดดไลน์|สิ้นสุด|ส่ง/.test(headerText);
+    for (const date of normalizedDates) {
+      dates.push({ field: header, date });
+      if (isDeadlineField) deadlineDates.push({ field: header, date });
+    }
+  }
+
+  const percent = extractProgressPercent(entries, lowerText);
+  const isComplete = percent >= 100 || /(^|\b)(done|complete|completed|finished|closed)(\b|$)|เสร็จ|ปิดงาน/.test(lowerText);
+  const blockers = entries
+    .filter(([header, value]) => /block|risk|issue|problem|ติด|ปัญหา|เสี่ยง/i.test(`${header} ${value}`))
+    .map(([header, value]) => `${header}: ${value}`)
+    .join(" | ");
+  const status = findFirstField(entries, /status|progress|state|สถานะ|ความคืบหน้า/i);
+  const owner = findFirstField(entries, /owner|assignee|developer|person|name|ผู้รับผิดชอบ|คนทำ|ชื่อ/i) || row.developer;
+  const title = findFirstField(entries, /task|milestone|feature|summary|title|name|work|งาน|หัวข้อ|ระบบ/i)
+    || row.summary
+    || row.rawUpdate
+    || text.slice(0, 120);
+
+  const deadlineTimes = deadlineDates
+    .map((item) => ({ ...item, time: new Date(`${item.date}T00:00:00+07:00`).getTime() }))
+    .filter((item) => Number.isFinite(item.time));
+  const allTimes = dates
+    .map((item) => ({ ...item, time: new Date(`${item.date}T00:00:00+07:00`).getTime() }))
+    .filter((item) => Number.isFinite(item.time));
+
+  return {
+    title,
+    owner,
+    status,
+    percent,
+    blockers,
+    dates,
+    deadlineDates,
+    isComplete,
+    isOverdue: deadlineTimes.some((item) => item.time < todayTime),
+    isDueSoon: deadlineTimes.some((item) => item.time >= todayTime && item.time <= soonTime),
+    isActiveWindow: allTimes.some((item) => item.time <= todayTime && item.time >= todayTime - 7 * 24 * 60 * 60 * 1000),
+  };
+}
+
+function extractProgressPercent(entries, fallbackText) {
+  const percentValues = [];
+  for (const [header, value] of entries) {
+    const text = `${header} ${value}`;
+    if (/percent|progress|complete|done|%|เปอร์|ความคืบหน้า/i.test(text)) {
+      const matches = String(value || "").match(/\d{1,3}/g) || [];
+      percentValues.push(...matches.map(Number).filter((number) => number >= 0 && number <= 100));
+    }
+  }
+
+  const fallbackMatches = String(fallbackText || "").match(/(\d{1,3})\s*%/g) || [];
+  percentValues.push(...fallbackMatches.map((value) => Number(value.replace(/\D/g, ""))).filter((number) => number >= 0 && number <= 100));
+  return percentValues.length ? Math.max(...percentValues) : 0;
+}
+
+function findFirstField(entries, pattern) {
+  const found = entries.find(([header, value]) => pattern.test(String(header || "")) && String(value || "").trim());
+  return found ? String(found[1]).trim() : "";
+}
+
 async function readProjectTimeline(project) {
   const sheets = await getSheetsClient();
-  const rows = await readRows(sheets, project, project.sheetName, "A:L");
+  const rows = await readRows(sheets, project, project.sheetName, "A:K");
   return rows.slice(1);
 }
 
@@ -2923,15 +3123,17 @@ function parseJsonObject(value) {
 function rowsToObjects(rows, startRowNumber = 2) {
   return rows.map((row, index) => ({
     rowNumber: startRowNumber + index,
-    date: row[0] || "",
-    developer: row[1] || "",
-    rawUpdate: row[2] || "",
-    summary: row[3] || "",
-    completed: row[4] || "",
-    inProgress: row[5] || "",
+    id: row[0] || "",
+    rock: row[1] || "",
+    priority: row[2] || "",
+    task: row[3] || "",
+    start: row[4] || "",
+    end: row[5] || "",
     blockers: row[6] || "",
-    nextSteps: row[7] || "",
-    tags: row[8] || "",
+    percent: row[7] || "",
+    response: row[8] || "",
+    subResponse: row[9] || "",
+    statusLateDay: row[10] || "",
   }));
 }
 
@@ -2939,29 +3141,34 @@ function timelineRowToObject(item) {
   const row = item.row || item;
   return {
     rowNumber: item.rowNumber || 0,
-    date: row[0] || "",
-    developer: row[1] || "",
-    rawUpdate: row[2] || "",
-    summary: row[3] || "",
-    completed: row[4] || "",
-    inProgress: row[5] || "",
+    id: row[0] || "",
+    rock: row[1] || "",
+    priority: row[2] || "",
+    task: row[3] || "",
+    start: row[4] || "",
+    end: row[5] || "",
     blockers: row[6] || "",
-    nextSteps: row[7] || "",
-    tags: row[8] || "",
+    percent: row[7] || "",
+    response: row[8] || "",
+    subResponse: row[9] || "",
+    statusLateDay: row[10] || "",
+    date: row[4] || "",
+    developer: row[8] || "",
+    rawUpdate: row[3] || row[9] || "",
+    summary: row[3] || "",
+    completed: row[7] || "",
+    inProgress: row[10] || "",
+    nextSteps: row[9] || "",
+    tags: row[1] || "",
   };
 }
 
 function isMeaningfulTimelineRow(row) {
-  return [
-    row[0],
-    row[1],
-    row[2],
-    row[3],
-    row[4],
-    row[5],
-    row[6],
-    row[7],
-  ].some((value) => String(value || "").trim());
+  return isMeaningfulSheetRow(row);
+}
+
+function isMeaningfulSheetRow(row) {
+  return (Array.isArray(row) ? row : []).some((value) => String(value || "").trim());
 }
 
 function feedbackRowToObject(row, rowNumber = 0) {
@@ -3139,7 +3346,7 @@ function headersForSheet(project, sheetName) {
   if (sheetName === project.feedbackSheetName) return FEEDBACK_HEADERS;
   if (sheetName === project.targetSheetName) return TARGET_HEADERS;
   if (sheetName === project.planSheetName) return PLAN_HEADERS;
-  return SHEET_HEADERS;
+  return TIMELINE_HEADERS;
 }
 
 function isDateInCurrentBangkokWeek(value) {

@@ -30,6 +30,7 @@ const teamMembers = [
 secretInput.value = state.secret;
 setDefaultDates();
 populateDailySubmitPeople();
+bindCollapsibleSections();
 bindTabs();
 bindForms();
 bindButtons();
@@ -63,6 +64,25 @@ function bindForms() {
       await submitForm(form);
     });
   });
+}
+
+function bindCollapsibleSections() {
+  document.querySelectorAll("[data-toggle-section]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const section = document.querySelector(`[data-section="${button.dataset.toggleSection}"]`);
+      if (!section) return;
+      section.classList.toggle("is-collapsed");
+      updateSectionToggle(section);
+    });
+  });
+
+  document.querySelectorAll(".collapsible-section").forEach(updateSectionToggle);
+}
+
+function updateSectionToggle(section) {
+  const button = section.querySelector(`[data-toggle-section="${section.dataset.section}"]`);
+  if (!button) return;
+  button.textContent = section.classList.contains("is-collapsed") ? "Show" : "Hide";
 }
 
 function bindButtons() {

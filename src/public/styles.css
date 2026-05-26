@@ -259,6 +259,46 @@ h3 {
   gap: 12px;
 }
 
+.collapsible-section {
+  display: grid;
+  gap: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfa;
+  padding: 14px;
+}
+
+.section-toggle-row {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.section-toggle-row h3 {
+  font-size: 18px;
+}
+
+.section-toggle-row .panel-actions {
+  flex-shrink: 0;
+  justify-content: end;
+}
+
+.section-toggle {
+  background: #fff;
+  color: var(--ink);
+  border: 1px solid var(--line);
+}
+
+.section-body {
+  display: grid;
+  gap: 14px;
+}
+
+.collapsible-section.is-collapsed .section-body {
+  display: none;
+}
+
 .daily-load-form {
   display: grid;
   grid-template-columns: minmax(150px, 180px) auto auto;
@@ -287,12 +327,7 @@ h3 {
 
 .weekly-review,
 .milestone-review {
-  display: grid;
-  gap: 14px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
   background: #fbfcfa;
-  padding: 14px;
 }
 
 .weekly-summary,
@@ -528,8 +563,6 @@ h3 {
 .daily-submit {
   display: grid;
   gap: 14px;
-  border-top: 1px solid var(--line);
-  padding-top: 16px;
 }
 
 .empty-state {
@@ -683,5 +716,14 @@ pre {
   .panel-head {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .section-toggle-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .section-toggle-row .panel-actions {
+    justify-content: stretch;
   }
 }

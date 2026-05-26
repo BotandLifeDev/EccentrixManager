@@ -48,13 +48,24 @@
             </form>
           </div>
 
-          <div class="daily-summary" id="dailyTaskSummary">
-            <strong>Morning task board</strong>
-            <span>Saved daily tasks will load here. Press Re-gen only when you want AI to analyze the full timelines again.</span>
-          </div>
+          <section class="collapsible-section is-collapsed" data-section="dailySummary">
+            <div class="section-toggle-row">
+              <div>
+                <h3>Daily Summary</h3>
+                <p class="panel-note">Morning task board overview.</p>
+              </div>
+              <button type="button" class="section-toggle" data-toggle-section="dailySummary">Show</button>
+            </div>
+            <div class="section-body">
+              <div class="daily-summary" id="dailyTaskSummary">
+                <strong>Morning task board</strong>
+                <span>Saved daily tasks will load here. Press Re-gen only when you want AI to analyze the full timelines again.</span>
+              </div>
+            </div>
+          </section>
 
-          <section class="weekly-review">
-            <div class="panel-head">
+          <section class="weekly-review collapsible-section is-collapsed" data-section="weeklyTasks">
+            <div class="section-toggle-row">
               <div>
                 <h3>Weekly Tasks</h3>
                 <p class="panel-note" id="weeklyTaskMeta">AI weekly plan for both full project timelines.</p>
@@ -62,17 +73,20 @@
               <div class="panel-actions">
                 <button type="button" id="loadSavedWeeklyBtn">Load Saved</button>
                 <button type="button" id="regenWeeklyBtn">Re-gen</button>
+                <button type="button" class="section-toggle" data-toggle-section="weeklyTasks">Show</button>
               </div>
             </div>
-            <div class="weekly-summary" id="weeklyTaskSummary">
-              <strong>No saved weekly task board loaded.</strong>
-              <span>Press Re-gen to analyze what should finish this week.</span>
+            <div class="section-body">
+              <div class="weekly-summary" id="weeklyTaskSummary">
+                <strong>No saved weekly task board loaded.</strong>
+                <span>Press Re-gen to analyze what should finish this week.</span>
+              </div>
+              <div class="weekly-board" id="weeklyTaskBoard" aria-live="polite"></div>
             </div>
-            <div class="weekly-board" id="weeklyTaskBoard" aria-live="polite"></div>
           </section>
 
-          <section class="milestone-review">
-            <div class="panel-head">
+          <section class="milestone-review collapsible-section is-collapsed" data-section="milestoneReview">
+            <div class="section-toggle-row">
               <div>
                 <h3>Milestone Review</h3>
                 <p class="panel-note" id="milestoneReviewMeta">AI review for both full project timelines at 06:00 Bangkok time.</p>
@@ -80,35 +94,54 @@
               <div class="panel-actions">
                 <button type="button" id="loadSavedMilestoneBtn">Load Saved</button>
                 <button type="button" id="regenMilestoneBtn">Re-gen</button>
+                <button type="button" class="section-toggle" data-toggle-section="milestoneReview">Show</button>
               </div>
             </div>
-            <div class="milestone-summary" id="milestoneReviewSummary">
-              <strong>No saved milestone review loaded.</strong>
-              <span>Press Re-gen to analyze full timeline progress, risks, and smooth areas for both projects.</span>
+            <div class="section-body">
+              <div class="milestone-summary" id="milestoneReviewSummary">
+                <strong>No saved milestone review loaded.</strong>
+                <span>Press Re-gen to analyze full timeline progress, risks, and smooth areas for both projects.</span>
+              </div>
+              <div class="milestone-grid" id="milestoneReviewGrid" aria-live="polite"></div>
             </div>
-            <div class="milestone-grid" id="milestoneReviewGrid" aria-live="polite"></div>
           </section>
 
-          <div class="people-board" id="dailyTaskBoard" aria-live="polite"></div>
+          <section class="collapsible-section is-collapsed" data-section="dailyTasksList">
+            <div class="section-toggle-row">
+              <div>
+                <h3>Daily Task List</h3>
+                <p class="panel-note">Today, carry-over, and ahead-of-time tasks by person.</p>
+              </div>
+              <button type="button" class="section-toggle" data-toggle-section="dailyTasksList">Show</button>
+            </div>
+            <div class="section-body">
+              <div class="people-board" id="dailyTaskBoard" aria-live="polite"></div>
+            </div>
+          </section>
 
-          <form class="daily-submit" id="dailyTaskSubmitForm">
-            <div class="panel-head">
+          <form class="daily-submit collapsible-section is-collapsed" id="dailyTaskSubmitForm" data-section="submitWork">
+            <div class="section-toggle-row">
               <div>
                 <h3>Submit Work</h3>
                 <p class="panel-note">Adjust today&apos;s percentages, add notes, then send them to AI to update the timeline.</p>
               </div>
-              <button type="submit">Send To AI</button>
+              <div class="panel-actions">
+                <button type="submit">Send To AI</button>
+                <button type="button" class="section-toggle" data-toggle-section="submitWork">Show</button>
+              </div>
             </div>
-            <div class="form-grid">
-              <label>Name
-                <select name="developer" required id="dailySubmitDeveloper"></select>
-              </label>
-              <label>Date
-                <input name="date" type="date">
-              </label>
-              <label class="wide">Submission note
-                <textarea name="note" rows="4" placeholder="What was completed, what is blocked, and what changed today"></textarea>
-              </label>
+            <div class="section-body">
+              <div class="form-grid">
+                <label>Name
+                  <select name="developer" required id="dailySubmitDeveloper"></select>
+                </label>
+                <label>Date
+                  <input name="date" type="date">
+                </label>
+                <label class="wide">Submission note
+                  <textarea name="note" rows="4" placeholder="What was completed, what is blocked, and what changed today"></textarea>
+                </label>
+              </div>
             </div>
           </form>
         </section>

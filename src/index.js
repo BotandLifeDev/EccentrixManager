@@ -810,7 +810,9 @@ async function createDailyTaskBoard(date = todayBangkok()) {
           "First analyze project problems, blockers, stale work, dependencies, owner workload, dates, time pressure, and deadline risk from every available timeline column.",
           "Use Start as the planned start date, End as the deadline/end date, Percent as completion percentage, Blockers as blocking issues, Priority as urgency, Task as the work item, Response/Sub Response as owner or response context, and Status&LateDay as late/status signal.",
           "Generate daily tasks only after that analysis. Today tasks must be tied to deadline pressure, carry-over risk, blockers, scheduleSignals, or current plan priorities.",
-          "If scheduleSignals has overdue or dueSoon rows, include them in todayTasks or carryOverTasks unless they are clearly complete.",
+          "Every overdue row and every lowProgressDeadline row in scheduleSignals must appear in todayTasks or carryOverTasks for its owner unless it is clearly complete.",
+          "Daily Tasks must be a recovery plan for all late work, not only a summary of recent updates.",
+          "When there is more late work than one person can finish in a day, set realistic targetPercent values and explain which late items must be recovered first.",
           "Return only valid JSON with keys: headline, summary, timelineAnalysis, people.",
           "timelineAnalysis has projectFindings, deadlineRisks, blockedOrLateWork, workloadNotes, assumptions.",
           "people is an array for every active team member. Each person has member, role, focus, todayTasks, carryOverTasks, advanceTasks, risks.",
@@ -838,7 +840,7 @@ async function createDailyTaskBoard(date = todayBangkok()) {
   });
 
   const parsed = parseJsonObject(response.choices?.[0]?.message?.content);
-  const people = normalizeDailyTaskPeople(parsed.people);
+  const people = enforceScheduleSignalDailyTasks(normalizeDailyTaskPeople(parsed.people), contexts);
 
   const result = {
     ok: true,
@@ -2269,6 +2271,7 @@ function analyzeTimelineScheduleRow(row, todayTime, soonTime) {
   const allTimes = dates
     .map((item) => ({ ...item, time: new Date(`${item.date}T00:00:00+07:00`).getTime() }))
     .filter((item) => Number.isFinite(item.time));
+  const isStatusLate = /late|overdue|delay|delayed|ล่าช้า|ช้า|เกิน|เลท|-\s*\d+\s*(day|days|วัน)/i.test(status || lowerText);
 
   return {
     title,
@@ -2279,7 +2282,7 @@ function analyzeTimelineScheduleRow(row, todayTime, soonTime) {
     dates,
     deadlineDates,
     isComplete,
-    isOverdue: deadlineTimes.some((item) => item.time < todayTime),
+    isOverdue: isStatusLate || deadlineTimes.some((item) => item.time < todayTime),
     isDueSoon: deadlineTimes.some((item) => item.time >= todayTime && item.time <= soonTime),
     isActiveWindow: allTimes.some((item) => item.time <= todayTime && item.time >= todayTime - 7 * 24 * 60 * 60 * 1000),
   };
@@ -2750,13 +2753,13 @@ function possibleSheetDates(value) {
     }
   }
 
-  const iso = input.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
-  if (iso) {
+  const isoMatches = input.matchAll(/(\d{4})-(\d{1,2})-(\d{1,2})/g);
+  for (const iso of isoMatches) {
     dates.add(formatDateParts(normalizeCalendarYear(Number(iso[1])), Number(iso[2]), Number(iso[3])));
   }
 
-  const slash = input.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})/);
-  if (slash) {
+  const slashMatches = input.matchAll(/(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})/g);
+  for (const slash of slashMatches) {
     const first = Number(slash[1]);
     const second = Number(slash[2]);
     const year = normalizeCalendarYear(Number(slash[3]));
@@ -3283,6 +3286,46 @@ function normalizeDailyProgressItems(items) {
       return { title, project, percent, timelineRowNumber, status, note };
     })
     .filter(Boolean);
+}
+
+function enforceScheduleSignalDailyTasks(people, contexts) {
+  const byName = new Map(people.map((person) => [person.member, person]));
+
+  for (const context of contexts) {
+    const requiredItems = [
+      ...context.scheduleSignals.overdue.map((item) => ({ ...item, reason: "Overdue" })),
+      ...context.scheduleSignals.lowProgressDeadline.map((item) => ({ ...item, reason: "Low progress near deadline" })),
+    ];
+
+    for (const item of requiredItems) {
+      const owner = normalizePersonName(item.owner || item.response || "");
+      const memberName = owner === "Unknown" ? "\u0e17\u0e35\u0e19" : owner;
+      const person = byName.get(memberName) || byName.get("\u0e17\u0e35\u0e19");
+      if (!person) continue;
+
+      const alreadyExists = [...person.todayTasks, ...person.carryOverTasks]
+        .some((task) => task.project === context.projectKey && task.timelineRowNumber === item.rowNumber);
+      if (alreadyExists) continue;
+
+      person.carryOverTasks.unshift({
+        id: `late-${context.projectKey}-${item.rowNumber}`,
+        project: context.projectKey,
+        title: item.title || `Timeline row ${item.rowNumber}`,
+        why: [
+          `${item.reason}: row ${item.rowNumber}`,
+          item.deadlineDates?.length ? `End ${item.deadlineDates.map((date) => date.date).join(", ")}` : "",
+          item.status ? `Status ${item.status}` : "",
+          item.blockers ? `Blockers ${item.blockers}` : "",
+        ].filter(Boolean).join(" | "),
+        targetPercent: 100,
+        currentPercent: clampPercent(item.percent),
+        priority: "High",
+        timelineRowNumber: item.rowNumber,
+      });
+    }
+  }
+
+  return people;
 }
 
 function normalizeMilestoneProjects(projects) {

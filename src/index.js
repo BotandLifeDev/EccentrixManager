@@ -2156,7 +2156,7 @@ async function readRows(sheets, project, sheetName, columns) {
     spreadsheetId: project.spreadsheetId,
     range: `${quoteSheet(sheetName)}!${columns}`,
   });
-  return response.data.values || [];
+  return normalizeReadRows(project, sheetName, columns, response.data.values || []);
 }
 
 async function readRowsRaw(sheets, project, sheetName, columns) {
@@ -2164,7 +2164,43 @@ async function readRowsRaw(sheets, project, sheetName, columns) {
     spreadsheetId: project.spreadsheetId,
     range: `${quoteSheet(sheetName)}!${columns}`,
   });
-  return response.data.values || [];
+  return normalizeReadRows(project, sheetName, columns, response.data.values || []);
+}
+
+function normalizeReadRows(project, sheetName, columns, rows) {
+  if (sheetName === project.sheetName && String(columns || "").toUpperCase() === "A:K") {
+    return fillMergedTimelineRockRows(rows);
+  }
+  return rows;
+}
+
+function fillMergedTimelineRockRows(rows) {
+  let currentRock = "";
+
+  return rows.map((row, index) => {
+    if (index === 0) return row;
+
+    const normalizedRow = [...row];
+    const hasTaskData = normalizedRow.some((value, columnIndex) => (
+      columnIndex !== 1 && String(value || "").trim()
+    ));
+    if (!hasTaskData) {
+      currentRock = "";
+      return normalizedRow;
+    }
+
+    const rock = String(normalizedRow[1] || "").trim();
+    if (rock) {
+      currentRock = rock;
+      return normalizedRow;
+    }
+
+    if (currentRock) {
+      normalizedRow[1] = currentRock;
+    }
+
+    return normalizedRow;
+  });
 }
 
 async function buildProjectManagementContext(sheets, project, weekStart) {

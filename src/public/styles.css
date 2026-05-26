@@ -261,7 +261,7 @@ h3 {
 
 .daily-load-form {
   display: grid;
-  grid-template-columns: minmax(150px, 180px) auto;
+  grid-template-columns: minmax(150px, 180px) auto auto;
   gap: 10px;
   align-items: end;
 }
@@ -276,12 +276,117 @@ h3 {
 }
 
 .daily-summary span,
+.milestone-summary span,
 .task-row p,
 .person-head p,
 .task-empty {
   margin: 0;
   color: var(--muted);
   line-height: 1.45;
+}
+
+.milestone-review {
+  display: grid;
+  gap: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfa;
+  padding: 14px;
+}
+
+.milestone-summary {
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  padding: 14px;
+}
+
+.milestone-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.milestone-card {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-left: 5px solid var(--accent);
+  border-radius: 8px;
+  background: #fff;
+  padding: 14px;
+}
+
+.milestone-card.watch {
+  border-left-color: var(--accent-2);
+}
+
+.milestone-card.risk,
+.milestone-card.blocked {
+  border-left-color: var(--danger);
+}
+
+.milestone-card-head {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  align-items: start;
+}
+
+.milestone-card-head h4 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.milestone-card-head p,
+.deadline-status,
+.evidence-row {
+  margin: 4px 0 0;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.milestone-card-head strong {
+  color: var(--accent-3);
+  font-size: 28px;
+  line-height: 1;
+}
+
+.progress-bar {
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--soft);
+}
+
+.progress-bar span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent-3);
+}
+
+.mini-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.mini-list strong,
+.mini-list span {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--soft);
+  padding: 5px 8px;
+  font-size: 12px;
+}
+
+.mini-list strong {
+  background: #fff;
+  color: var(--accent-2);
 }
 
 .people-board {
@@ -541,6 +646,7 @@ pre {
   .status-grid,
   .form-grid,
   .action-grid,
+  .milestone-grid,
   .people-board,
   .chat-layout,
   .bot-layout {
@@ -555,6 +661,7 @@ pre {
   }
 
   .person-head,
+  .milestone-card-head,
   .task-title-line,
   .percent-control {
     grid-template-columns: 1fr;

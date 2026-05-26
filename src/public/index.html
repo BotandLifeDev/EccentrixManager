@@ -43,14 +43,33 @@
             </div>
             <form class="daily-load-form" id="dailyTaskLoadForm">
               <input name="date" type="date" aria-label="Daily task date">
-              <button type="submit">Generate</button>
+              <button type="button" id="loadSavedDailyTasksBtn">Load Saved</button>
+              <button type="submit">Re-gen</button>
             </form>
           </div>
 
           <div class="daily-summary" id="dailyTaskSummary">
             <strong>Morning task board</strong>
-            <span>Generate today&apos;s AI task list to see work by person, carry-over items, and advance suggestions.</span>
+            <span>Saved daily tasks will load here. Press Re-gen only when you want AI to analyze the full timelines again.</span>
           </div>
+
+          <section class="milestone-review">
+            <div class="panel-head">
+              <div>
+                <h3>Milestone Review</h3>
+                <p class="panel-note" id="milestoneReviewMeta">AI review for both full project timelines at 06:00 Bangkok time.</p>
+              </div>
+              <div class="panel-actions">
+                <button type="button" id="loadSavedMilestoneBtn">Load Saved</button>
+                <button type="button" id="regenMilestoneBtn">Re-gen</button>
+              </div>
+            </div>
+            <div class="milestone-summary" id="milestoneReviewSummary">
+              <strong>No saved milestone review loaded.</strong>
+              <span>Press Re-gen to analyze full timeline progress, risks, and smooth areas for both projects.</span>
+            </div>
+            <div class="milestone-grid" id="milestoneReviewGrid" aria-live="polite"></div>
+          </section>
 
           <div class="people-board" id="dailyTaskBoard" aria-live="polite"></div>
 

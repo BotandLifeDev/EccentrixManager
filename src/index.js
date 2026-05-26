@@ -199,6 +199,8 @@ const grok = env.grokApiKey
   : null;
 let discordClient = null;
 let dailyReportTimer = null;
+const dailyTaskCache = new Map();
+const milestoneReviewCache = new Map();
 
 const PM_ASSISTANT_SYSTEM_PROMPT = [
   "You are an AI Project Manager Assistant responsible for managing project updates, timelines, reporting, and workflow organization.",
@@ -420,12 +422,36 @@ app.post("/assistant/chat", async (req, res) => {
   }
 });
 
+app.get("/daily-tasks", (req, res) => {
+  try {
+    assertWebAuth(req);
+    const date = normalizeDate(req.query.date);
+    const cached = getCachedDailyTaskBoard(date);
+    res.json(cached || {
+      ok: true,
+      cached: false,
+      date,
+      message: "No saved daily task board for this date. Press Re-gen to create one.",
+    });
+  } catch (error) {
+    sendHttpError(res, error);
+  }
+});
+
 app.post("/daily-tasks", async (req, res) => {
   try {
     assertWebAuth(req);
     const date = normalizeDate(req.body.date);
-    const result = await createDailyTaskBoard(date);
-    res.json(result);
+    const regenerate = req.body.regenerate === true;
+    const result = regenerate
+      ? await createDailyTaskBoard(date)
+      : getCachedDailyTaskBoard(date);
+    res.json(result || {
+      ok: true,
+      cached: false,
+      date,
+      message: "No saved daily task board for this date. Send regenerate=true to create one.",
+    });
   } catch (error) {
     sendHttpError(res, error);
   }
@@ -436,6 +462,41 @@ app.post("/daily-task-submit", async (req, res) => {
     assertWebAuth(req);
     const result = await handleDailyTaskSubmission(req.body);
     res.status(201).json(result);
+  } catch (error) {
+    sendHttpError(res, error);
+  }
+});
+
+app.get("/milestone-review", (req, res) => {
+  try {
+    assertWebAuth(req);
+    const date = normalizeDate(req.query.date);
+    const cached = getCachedMilestoneReview(date);
+    res.json(cached || {
+      ok: true,
+      cached: false,
+      date,
+      message: "No saved milestone review for this date. Press Re-gen to create one.",
+    });
+  } catch (error) {
+    sendHttpError(res, error);
+  }
+});
+
+app.post("/milestone-review", async (req, res) => {
+  try {
+    assertWebAuth(req);
+    const date = normalizeDate(req.body.date);
+    const regenerate = req.body.regenerate === true;
+    const result = regenerate
+      ? await createMilestoneReview(date)
+      : getCachedMilestoneReview(date);
+    res.json(result || {
+      ok: true,
+      cached: false,
+      date,
+      message: "No saved milestone review for this date. Send regenerate=true to create one.",
+    });
   } catch (error) {
     sendHttpError(res, error);
   }
@@ -707,12 +768,12 @@ async function createDailyTaskBoard(date = todayBangkok()) {
   const contexts = [];
 
   for (const project of Object.values(PROJECTS)) {
-    contexts.push(await buildProjectManagementContext(sheets, project, weekStart));
+    contexts.push(await buildFullDailyTaskContext(sheets, project, weekStart));
   }
 
   const response = await grok.chat.completions.create({
     model: env.grokModel,
-    temperature: 0.2,
+    temperature: 0.1,
     response_format: { type: "json_object" },
     messages: [
       {
@@ -720,14 +781,20 @@ async function createDailyTaskBoard(date = todayBangkok()) {
         content: [
           PM_ASSISTANT_SYSTEM_PROMPT,
           "Create a daily work board for a small game team every morning at 06:00 Bangkok time.",
-          "Analyze both project timelines, current weekly plans, targets, open feedback, blockers, and recent updates.",
-          "Return only valid JSON with keys: headline, summary, people.",
+          "You must inspect 100% of the provided fullTimeline rows for both projects before assigning tasks.",
+          "Do not rely only on recent rows. Use rowCounts to confirm timelineSentToAi equals meaningfulTimeline for each project.",
+          "First analyze project problems, blockers, stale work, dependencies, owner workload, dates, time pressure, and deadline risk from every available timeline column.",
+          "Treat columns named Date, Deadline, Due Date, End Date, Target Date, Time, Duration, Status, Progress, Percent, Blockers, Next Steps, Priority, Assignee, Owner, Developer, or similar as schedule signals.",
+          "Generate daily tasks only after that analysis. Today tasks must be tied to deadline pressure, carry-over risk, blockers, or current plan priorities.",
+          "Return only valid JSON with keys: headline, summary, timelineAnalysis, people.",
+          "timelineAnalysis has projectFindings, deadlineRisks, blockedOrLateWork, workloadNotes, assumptions.",
           "people is an array for every active team member. Each person has member, role, focus, todayTasks, carryOverTasks, advanceTasks, risks.",
           "Each task has id, project, title, why, targetPercent, currentPercent, priority, timelineRowNumber.",
           "todayTasks are tasks that should be completed today or should reach a target percent today.",
           "carryOverTasks are unfinished tasks from previous days.",
           "advanceTasks are recommended ahead-of-schedule tasks for spare time.",
           "Use timelineRowNumber when a task maps to a provided timeline row; otherwise use null.",
+          "The why field must briefly mention the timeline evidence, deadline, blocker, or date reason used.",
           "Percent values must be numbers from 0 to 100. Keep Thai task wording when the sheet context is Thai.",
         ].join("\n"),
       },
@@ -747,16 +814,21 @@ async function createDailyTaskBoard(date = todayBangkok()) {
   const parsed = parseJsonObject(response.choices?.[0]?.message?.content);
   const people = normalizeDailyTaskPeople(parsed.people);
 
-  return {
+  const result = {
     ok: true,
+    cached: false,
     date,
     generatedAt: new Date().toISOString(),
     morningReviewTime: env.dailyTaskTime,
     headline: String(parsed.headline || "Daily task board").trim(),
     summary: String(parsed.summary || "").trim(),
+    timelineAnalysis: parsed.timelineAnalysis || null,
     people,
     contextSummary: summarizeProjectContexts(contexts),
   };
+
+  dailyTaskCache.set(date, result);
+  return result;
 }
 
 async function handleDailyTaskSubmission(body) {
@@ -828,6 +900,75 @@ async function handleDailyTaskSubmission(body) {
     actionsRequested: actions,
     actionsApplied: appliedActions,
   };
+}
+
+async function createMilestoneReview(date = todayBangkok()) {
+  validateRuntimeConfig();
+
+  const sheets = await getSheetsClient();
+  const weekStart = normalizeWeekStart(date);
+  const contexts = [];
+
+  for (const project of Object.values(PROJECTS)) {
+    contexts.push(await buildFullDailyTaskContext(sheets, project, weekStart));
+  }
+
+  const response = await grok.chat.completions.create({
+    model: env.grokModel,
+    temperature: 0.1,
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content: [
+          PM_ASSISTANT_SYSTEM_PROMPT,
+          "Create a milestone review for both game projects at the same 06:00 Bangkok morning review time as Daily Tasks.",
+          "You must inspect 100% of each project's provided fullTimeline rows before estimating milestone progress.",
+          "Use every available timeline column, including date, deadline, due date, milestone, task, status, progress, percent, blocker, dependency, priority, owner, and next steps fields.",
+          "Analyze current milestone progress, actual completion percentage, schedule pressure, deadline risk, blockers, smooth areas, and next recommendations.",
+          "Do not claim a percentage without explaining the evidence used from the timeline.",
+          "Return only valid JSON with keys: headline, summary, overallPercent, projects, concerns, smoothAreas, recommendations.",
+          "projects is an array with projectKey, project, currentMilestone, percentComplete, status, deadlineStatus, concerns, smoothAreas, evidenceRows, nextReviewFocus.",
+          "status must be one of: smooth, watch, risk, blocked.",
+          "deadlineStatus should explain whether timing is on track, tight, late, unknown, or blocked.",
+          "evidenceRows is an array of Google Sheet row numbers used as evidence.",
+          "Percent values must be numbers from 0 to 100. Keep Thai wording when the sheet context is Thai.",
+        ].join("\n"),
+      },
+      {
+        role: "user",
+        content: JSON.stringify({
+          today: date,
+          morningReviewTime: env.dailyTaskTime,
+          team: teamPromptData(),
+          projects: contexts,
+          contextSummary: summarizeProjectContexts(contexts),
+        }),
+      },
+    ],
+  });
+
+  const parsed = parseJsonObject(response.choices?.[0]?.message?.content);
+  const projects = normalizeMilestoneProjects(parsed.projects);
+
+  const result = {
+    ok: true,
+    cached: false,
+    date,
+    generatedAt: new Date().toISOString(),
+    morningReviewTime: env.dailyTaskTime,
+    headline: String(parsed.headline || "Milestone Review").trim(),
+    summary: String(parsed.summary || "").trim(),
+    overallPercent: clampPercent(parsed.overallPercent ?? averagePercent(projects)),
+    projects,
+    concerns: asArray(parsed.concerns),
+    smoothAreas: asArray(parsed.smoothAreas),
+    recommendations: asArray(parsed.recommendations),
+    contextSummary: summarizeProjectContexts(contexts),
+  };
+
+  milestoneReviewCache.set(date, result);
+  return result;
 }
 
 async function executeAssistantActions(actions, options = {}) {
@@ -1890,6 +2031,80 @@ async function buildProjectManagementContext(sheets, project, weekStart) {
   };
 }
 
+async function buildFullDailyTaskContext(sheets, project, weekStart) {
+  const timelineRows = await readRows(sheets, project, project.sheetName, "A:Z");
+  const feedbackRows = await readRows(sheets, project, project.feedbackSheetName, "A:I");
+  const targetRows = await readRows(sheets, project, project.targetSheetName, "A:I");
+  const planRows = await readRows(sheets, project, project.planSheetName, "A:K");
+  const timelineHeaders = normalizeSheetHeaders(timelineRows[0] || SHEET_HEADERS);
+  const timelineDataRows = timelineRows.slice(1);
+  const meaningfulTimelineRows = timelineDataRows
+    .map((row, index) => ({ row, rowNumber: index + 2 }))
+    .filter((item) => isMeaningfulTimelineRow(item.row));
+
+  return {
+    project: project.label,
+    projectKey: project.key,
+    weekStart,
+    team: teamPromptData(project.key),
+    rowCounts: {
+      timeline: timelineDataRows.length,
+      meaningfulTimeline: meaningfulTimelineRows.length,
+      timelineSentToAi: meaningfulTimelineRows.length,
+      timelineContextLimit: "full",
+      feedback: Math.max(0, feedbackRows.length - 1),
+      weeklyTargets: Math.max(0, targetRows.length - 1),
+      weeklyPlan: Math.max(0, planRows.length - 1),
+    },
+    timelineHeaders,
+    fullTimeline: meaningfulTimelineRows.map((item) => sheetRowToObject(timelineHeaders, item.row, item.rowNumber)),
+    recentTimeline: meaningfulTimelineRows.slice(-10).map((item) => timelineRowToObject(item)),
+    openFeedback: feedbackRows
+      .slice(1)
+      .map((row, index) => ({ row, rowNumber: index + 2 }))
+      .filter((item) => String(item.row[6] || "").toLowerCase() !== "done")
+      .map((item) => feedbackRowToObject(item.row, item.rowNumber)),
+    weeklyTargets: targetRows
+      .slice(1)
+      .map((row, index) => ({ row, rowNumber: index + 2 }))
+      .filter((item) => item.row[0] === weekStart)
+      .map((item) => targetRowToObject(item.row, item.rowNumber)),
+    currentPlan: planRows
+      .slice(1)
+      .map((row, index) => ({ row, rowNumber: index + 2 }))
+      .filter((item) => item.row[0] === weekStart)
+      .map((item) => planRowToObject(item.row, item.rowNumber)),
+  };
+}
+
+function getCachedDailyTaskBoard(date) {
+  const cached = dailyTaskCache.get(date);
+  return cached ? { ...cached, cached: true } : null;
+}
+
+function getCachedMilestoneReview(date) {
+  const cached = milestoneReviewCache.get(date);
+  return cached ? { ...cached, cached: true } : null;
+}
+
+function normalizeSheetHeaders(headers) {
+  return headers.map((header, index) => String(header || `Column ${columnLetter(index + 1)}`).trim());
+}
+
+function sheetRowToObject(headers, row, rowNumber) {
+  const fields = {};
+  headers.forEach((header, index) => {
+    const value = row[index];
+    if (String(value || "").trim()) fields[header] = value;
+  });
+
+  return {
+    rowNumber,
+    ...timelineRowToObject({ row, rowNumber }),
+    fields,
+  };
+}
+
 async function readProjectTimeline(project) {
   const sheets = await getSheetsClient();
   const rows = await readRows(sheets, project, project.sheetName, "A:L");
@@ -2615,6 +2830,7 @@ function createAdminStatus(req) {
       weeklyPlan: "/weekly-plan",
       dailyTasks: "/daily-tasks",
       dailyTaskSubmit: "/daily-task-submit",
+      milestoneReview: "/milestone-review",
       timelineAnalysis: "/timeline-analysis",
       registerCommands: "/discord/register-commands",
       testReport: "/discord/test-report",
@@ -2860,6 +3076,52 @@ function normalizeDailyProgressItems(items) {
       return { title, project, percent, timelineRowNumber, status, note };
     })
     .filter(Boolean);
+}
+
+function normalizeMilestoneProjects(projects) {
+  return (Array.isArray(projects) ? projects : [])
+    .map((project) => {
+      const projectKey = normalizeProjectKey(project.projectKey || project.project || project.name);
+      const resolved = projectKey ? PROJECTS[projectKey] : null;
+
+      return {
+        projectKey,
+        project: String(project.project || resolved?.label || "Unknown project").trim(),
+        currentMilestone: String(project.currentMilestone || project.milestone || "Current milestone").trim(),
+        percentComplete: clampPercent(project.percentComplete ?? project.percent ?? project.progress),
+        status: normalizeMilestoneStatus(project.status),
+        deadlineStatus: String(project.deadlineStatus || project.timing || "Unknown").trim(),
+        concerns: asArray(project.concerns),
+        smoothAreas: asArray(project.smoothAreas),
+        evidenceRows: normalizeEvidenceRows(project.evidenceRows || project.rows),
+        nextReviewFocus: asArray(project.nextReviewFocus || project.nextSteps),
+      };
+    })
+    .filter((project) => project.projectKey || project.project !== "Unknown project");
+}
+
+function normalizeMilestoneStatus(value) {
+  const status = String(value || "").trim().toLowerCase();
+  if (["smooth", "watch", "risk", "blocked"].includes(status)) return status;
+  if (status.includes("block")) return "blocked";
+  if (status.includes("risk") || status.includes("late")) return "risk";
+  if (status.includes("watch") || status.includes("tight")) return "watch";
+  return "smooth";
+}
+
+function normalizeEvidenceRows(value) {
+  return (Array.isArray(value) ? value : [])
+    .map((row) => Number(row))
+    .filter((row) => Number.isInteger(row) && row >= 2)
+    .slice(0, 12);
+}
+
+function averagePercent(projects) {
+  const values = projects
+    .map((project) => Number(project.percentComplete))
+    .filter((value) => Number.isFinite(value));
+  if (values.length === 0) return 0;
+  return Math.round(values.reduce((total, value) => total + value, 0) / values.length);
 }
 
 function clampPercent(value) {

@@ -13,6 +13,9 @@ const dailyTaskBoard = document.querySelector("#dailyTaskBoard");
 const dailyTaskSummary = document.querySelector("#dailyTaskSummary");
 const dailyTaskMeta = document.querySelector("#dailyTaskMeta");
 const dailySubmitDeveloper = document.querySelector("#dailySubmitDeveloper");
+const milestoneReviewMeta = document.querySelector("#milestoneReviewMeta");
+const milestoneReviewSummary = document.querySelector("#milestoneReviewSummary");
+const milestoneReviewGrid = document.querySelector("#milestoneReviewGrid");
 
 const teamMembers = [
   { name: "\u0e17\u0e35\u0e19", role: "Leader and overall manager" },
@@ -28,7 +31,8 @@ bindTabs();
 bindForms();
 bindButtons();
 loadStatus();
-loadDailyTasks();
+loadSavedDailyTasks();
+loadSavedMilestoneReview();
 
 function setDefaultDates() {
   const today = new Date().toISOString().slice(0, 10);
@@ -98,7 +102,19 @@ function bindButtons() {
 
   document.querySelector("#dailyTaskLoadForm").addEventListener("submit", async (event) => {
     event.preventDefault();
-    await loadDailyTasks(event.currentTarget);
+    await regenerateDailyTasks(event.currentTarget);
+  });
+
+  document.querySelector("#loadSavedDailyTasksBtn").addEventListener("click", async () => {
+    await loadSavedDailyTasks();
+  });
+
+  document.querySelector("#loadSavedMilestoneBtn").addEventListener("click", async () => {
+    await loadSavedMilestoneReview();
+  });
+
+  document.querySelector("#regenMilestoneBtn").addEventListener("click", async () => {
+    await regenerateMilestoneReview();
   });
 
   document.querySelector("#dailyTaskSubmitForm").addEventListener("submit", async (event) => {
@@ -168,19 +184,122 @@ async function loadStatus() {
   }
 }
 
-async function loadDailyTasks(form = document.querySelector("#dailyTaskLoadForm")) {
+async function loadSavedDailyTasks(form = document.querySelector("#dailyTaskLoadForm")) {
+  const button = document.querySelector("#loadSavedDailyTasksBtn");
+  const date = form?.elements.date?.value || new Date().toISOString().slice(0, 10);
+  const local = loadLocalDailyTasks(date);
+
+  if (local) {
+    state.dailyTasks = local;
+    renderDailyTasks(local);
+  } else {
+    dailyTaskBoard.innerHTML = '<div class="empty-state">No saved daily tasks in this browser yet. Press Re-gen to create one.</div>';
+  }
+
+  const originalText = button?.textContent;
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Loading...";
+  }
+
+  try {
+    const result = await request(`/daily-tasks?date=${encodeURIComponent(date)}`, { method: "GET" });
+    if (result?.people?.length) {
+      saveLocalDailyTasks(result);
+      state.dailyTasks = result;
+      renderDailyTasks(result);
+    } else if (!local) {
+      dailyTaskSummary.innerHTML = [
+        "<strong>Morning task board</strong>",
+        `<span>${escapeHtml(result.message || "No saved daily task board for this date.")}</span>`,
+      ].join("");
+    }
+  } catch (error) {
+    if (!local) {
+      dailyTaskBoard.innerHTML = '<div class="empty-state">Saved tasks could not be loaded. Check WEB_FORM_SECRET and API status.</div>';
+    }
+    print({ error: error.message });
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalText;
+    }
+  }
+}
+
+async function regenerateDailyTasks(form = document.querySelector("#dailyTaskLoadForm")) {
   const button = form?.querySelector('button[type="submit"]');
   const date = form?.elements.date?.value || new Date().toISOString().slice(0, 10);
-  dailyTaskBoard.innerHTML = '<div class="empty-state">Generating daily tasks...</div>';
+  dailyTaskBoard.innerHTML = '<div class="empty-state">AI is analyzing the full timelines for both games...</div>';
 
-  const result = await postJson("/daily-tasks", { date }, button);
+  const result = await postJson("/daily-tasks", { date, regenerate: true }, button);
   if (!result) {
     dailyTaskBoard.innerHTML = '<div class="empty-state">Daily tasks could not be loaded. Check WEB_FORM_SECRET and API status.</div>';
     return;
   }
 
+  saveLocalDailyTasks(result);
   state.dailyTasks = result;
   renderDailyTasks(result);
+}
+
+async function loadSavedMilestoneReview(form = document.querySelector("#dailyTaskLoadForm")) {
+  const button = document.querySelector("#loadSavedMilestoneBtn");
+  const date = form?.elements.date?.value || new Date().toISOString().slice(0, 10);
+  const local = loadLocalMilestoneReview(date);
+
+  if (local) {
+    state.milestoneReview = local;
+    renderMilestoneReview(local);
+  } else {
+    milestoneReviewGrid.innerHTML = '<div class="empty-state">No saved milestone review in this browser yet. Press Re-gen to create one.</div>';
+  }
+
+  const originalText = button?.textContent;
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Loading...";
+  }
+
+  try {
+    const result = await request(`/milestone-review?date=${encodeURIComponent(date)}`, { method: "GET" });
+    if (result?.projects?.length) {
+      saveLocalMilestoneReview(result);
+      state.milestoneReview = result;
+      renderMilestoneReview(result);
+    } else if (!local) {
+      milestoneReviewSummary.innerHTML = [
+        "<strong>No saved milestone review loaded.</strong>",
+        `<span>${escapeHtml(result.message || "No saved milestone review for this date.")}</span>`,
+      ].join("");
+    }
+  } catch (error) {
+    if (!local) {
+      milestoneReviewGrid.innerHTML = '<div class="empty-state">Saved milestone review could not be loaded. Check WEB_FORM_SECRET and API status.</div>';
+    }
+    print({ error: error.message });
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalText;
+    }
+  }
+}
+
+async function regenerateMilestoneReview(form = document.querySelector("#dailyTaskLoadForm")) {
+  const button = document.querySelector("#regenMilestoneBtn");
+  const date = form?.elements.date?.value || new Date().toISOString().slice(0, 10);
+  milestoneReviewGrid.innerHTML = '<div class="empty-state">AI is analyzing full milestone progress for both projects...</div>';
+
+  const result = await postJson("/milestone-review", { date, regenerate: true }, button);
+  if (!result) {
+    milestoneReviewGrid.innerHTML = '<div class="empty-state">Milestone review could not be loaded. Check WEB_FORM_SECRET and API status.</div>';
+    return;
+  }
+
+  saveLocalMilestoneReview(result);
+  state.milestoneReview = result;
+  renderMilestoneReview(result);
 }
 
 async function submitDailyTasks(form) {
@@ -295,10 +414,11 @@ function renderStatus(data, error) {
 
 function renderDailyTasks(data) {
   const people = Array.isArray(data.people) ? data.people : [];
-  dailyTaskMeta.textContent = `AI review for ${data.date} at ${data.morningReviewTime || "06:00"} Bangkok time.`;
+  const savedText = data.generatedAt ? ` Generated ${new Date(data.generatedAt).toLocaleString()}.` : "";
+  dailyTaskMeta.textContent = `AI review for ${data.date} at ${data.morningReviewTime || "06:00"} Bangkok time.${savedText}`;
   dailyTaskSummary.innerHTML = [
     `<strong>${escapeHtml(data.headline || "Daily task board")}</strong>`,
-    `<span>${escapeHtml(data.summary || "Review today's tasks, carry-over work, and advance suggestions.")}</span>`,
+    `<span>${escapeHtml(formatDailyTaskSummary(data))}</span>`,
   ].join("");
 
   dailyTaskBoard.innerHTML = people.length
@@ -311,6 +431,81 @@ function renderDailyTasks(data) {
       if (value) value.textContent = `${range.value}%`;
     });
   });
+}
+
+function formatDailyTaskSummary(data) {
+  const analysis = data.timelineAnalysis || {};
+  const risks = asTextList(analysis.deadlineRisks).slice(0, 3).join(" | ");
+  const blocked = asTextList(analysis.blockedOrLateWork).slice(0, 3).join(" | ");
+  return [
+    data.summary || "Review today's tasks, carry-over work, and advance suggestions.",
+    risks ? `Deadline risks: ${risks}` : "",
+    blocked ? `Blocked/late: ${blocked}` : "",
+  ].filter(Boolean).join(" ");
+}
+
+function asTextList(value) {
+  if (Array.isArray(value)) return value.map((item) => typeof item === "string" ? item : JSON.stringify(item));
+  if (typeof value === "string" && value.trim()) return [value.trim()];
+  return [];
+}
+
+function renderMilestoneReview(data) {
+  const projects = Array.isArray(data.projects) ? data.projects : [];
+  const savedText = data.generatedAt ? ` Generated ${new Date(data.generatedAt).toLocaleString()}.` : "";
+  milestoneReviewMeta.textContent = `AI milestone review for ${data.date} at ${data.morningReviewTime || "06:00"} Bangkok time.${savedText}`;
+  milestoneReviewSummary.innerHTML = [
+    `<strong>${escapeHtml(data.headline || "Milestone Review")} - ${Number(data.overallPercent || 0)}%</strong>`,
+    `<span>${escapeHtml(formatMilestoneSummary(data))}</span>`,
+  ].join("");
+  milestoneReviewGrid.innerHTML = projects.length
+    ? projects.map(renderMilestoneProject).join("")
+    : '<div class="empty-state">No milestone review returned by AI.</div>';
+}
+
+function renderMilestoneProject(project) {
+  const concerns = renderMiniList("Worry", project.concerns);
+  const smooth = renderMiniList("Smooth", project.smoothAreas);
+  const focus = renderMiniList("Next", project.nextReviewFocus);
+  const rows = Array.isArray(project.evidenceRows) && project.evidenceRows.length
+    ? `<p class="evidence-row">Rows: ${project.evidenceRows.map((row) => `#${escapeHtml(row)}`).join(", ")}</p>`
+    : "";
+
+  return [
+    `<article class="milestone-card ${escapeHtml(project.status || "smooth")}">`,
+    '<div class="milestone-card-head">',
+    `<div><h4>${escapeHtml(project.project || projectLabel(project.projectKey))}</h4><p>${escapeHtml(project.currentMilestone || "Current milestone")}</p></div>`,
+    `<strong>${Number(project.percentComplete || 0)}%</strong>`,
+    '</div>',
+    `<div class="progress-bar"><span style="width: ${Math.max(0, Math.min(100, Number(project.percentComplete || 0)))}%"></span></div>`,
+    `<p class="deadline-status">${escapeHtml(project.deadlineStatus || "Unknown timing")}</p>`,
+    concerns,
+    smooth,
+    focus,
+    rows,
+    '</article>',
+  ].join("");
+}
+
+function formatMilestoneSummary(data) {
+  const concerns = asTextList(data.concerns).slice(0, 3).join(" | ");
+  const smooth = asTextList(data.smoothAreas).slice(0, 3).join(" | ");
+  return [
+    data.summary || "Full timeline milestone review for both projects.",
+    concerns ? `Worry: ${concerns}` : "",
+    smooth ? `Smooth: ${smooth}` : "",
+  ].filter(Boolean).join(" ");
+}
+
+function renderMiniList(label, values) {
+  const items = asTextList(values);
+  if (!items.length) return "";
+  return [
+    '<div class="mini-list">',
+    `<strong>${escapeHtml(label)}</strong>`,
+    ...items.slice(0, 4).map((item) => `<span>${escapeHtml(item)}</span>`),
+    '</div>',
+  ].join("");
 }
 
 function renderPersonTasks(person) {
@@ -401,6 +596,40 @@ function projectLabel(project) {
 function cssEscape(value) {
   if (window.CSS?.escape) return window.CSS.escape(value);
   return String(value).replace(/"/g, '\\"');
+}
+
+function dailyTaskStorageKey(date) {
+  return `eccentrixDailyTasks:${date}`;
+}
+
+function saveLocalDailyTasks(data) {
+  if (!data?.date) return;
+  localStorage.setItem(dailyTaskStorageKey(data.date), JSON.stringify(data));
+}
+
+function loadLocalDailyTasks(date) {
+  try {
+    return JSON.parse(localStorage.getItem(dailyTaskStorageKey(date)) || "null");
+  } catch (_error) {
+    return null;
+  }
+}
+
+function milestoneStorageKey(date) {
+  return `eccentrixMilestoneReview:${date}`;
+}
+
+function saveLocalMilestoneReview(data) {
+  if (!data?.date) return;
+  localStorage.setItem(milestoneStorageKey(data.date), JSON.stringify(data));
+}
+
+function loadLocalMilestoneReview(date) {
+  try {
+    return JSON.parse(localStorage.getItem(milestoneStorageKey(date)) || "null");
+  } catch (_error) {
+    return null;
+  }
 }
 
 function statusCard(label, value, tone) {

@@ -525,7 +525,7 @@ h3 {
 
 .percent-control {
   display: grid;
-  grid-template-columns: 1fr 48px 84px;
+  grid-template-columns: 1fr minmax(92px, auto) minmax(84px, auto);
   gap: 8px;
   align-items: center;
 }
@@ -536,12 +536,15 @@ h3 {
 
 .percent-value {
   font-weight: 800;
+  color: var(--accent-3);
   text-align: right;
+  white-space: nowrap;
 }
 
 .percent-control small {
   color: var(--muted);
   font-weight: 700;
+  white-space: nowrap;
 }
 
 .risk-list {

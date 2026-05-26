@@ -540,13 +540,7 @@ function renderDailyTasks(data) {
   dailyTaskBoard.innerHTML = people.length
     ? people.map(renderPersonTasks).join("")
     : '<div class="empty-state">No daily tasks returned by AI.</div>';
-
-  dailyTaskBoard.querySelectorAll('input[type="range"]').forEach((range) => {
-    range.addEventListener("input", () => {
-      const value = range.closest(".task-row").querySelector(".percent-value");
-      if (value) value.textContent = `${range.value}%`;
-    });
-  });
+  bindPercentSliders(dailyTaskBoard);
 }
 
 function formatDailyTaskSummary(data) {
@@ -579,6 +573,7 @@ function renderWeeklyTasks(data) {
   weeklyTaskBoard.innerHTML = people.length
     ? people.map(renderWeeklyPersonTasks).join("")
     : '<div class="empty-state">No weekly tasks returned by AI.</div>';
+  bindPercentSliders(weeklyTaskBoard);
 }
 
 function formatWeeklySummary(data) {
@@ -733,12 +728,21 @@ function renderTaskRow(member, group, task) {
     `<p>${escapeHtml(task.why || "Target today")}</p>`,
     '<div class="percent-control">',
     `<input type="range" min="0" max="100" step="5" value="${current}" aria-label="Task percent">`,
-    `<span class="percent-value">${current}%</span>`,
+    `<span class="percent-value">Current ${current}%</span>`,
     `<small>Target ${target}%</small>`,
     '</div>',
     '</div>',
     '</div>',
   ].join("");
+}
+
+function bindPercentSliders(board) {
+  board.querySelectorAll('input[type="range"]').forEach((range) => {
+    range.addEventListener("input", () => {
+      const value = range.closest(".task-row").querySelector(".percent-value");
+      if (value) value.textContent = `Current ${range.value}%`;
+    });
+  });
 }
 
 function collectDailyProgressItems(developer) {
@@ -755,6 +759,7 @@ function collectProgressItemsFromBoard(board) {
       project: row.dataset.project || "",
       timelineRowNumber: row.dataset.rowNumber || "",
       percent: row.querySelector('input[type="range"]').value,
+      currentPercent: row.querySelector('input[type="range"]').value,
       status: row.dataset.group || "",
     }));
 }

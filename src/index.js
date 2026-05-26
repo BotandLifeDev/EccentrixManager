@@ -221,6 +221,7 @@ const grok = env.grokApiKey
 let discordClient = null;
 let dailyReportTimer = null;
 const dailyTaskCache = new Map();
+const weeklyTaskCache = new Map();
 const milestoneReviewCache = new Map();
 
 const PM_ASSISTANT_SYSTEM_PROMPT = [
@@ -483,6 +484,41 @@ app.post("/daily-task-submit", async (req, res) => {
     assertWebAuth(req);
     const result = await handleDailyTaskSubmission(req.body);
     res.status(201).json(result);
+  } catch (error) {
+    sendHttpError(res, error);
+  }
+});
+
+app.get("/weekly-tasks", (req, res) => {
+  try {
+    assertWebAuth(req);
+    const weekStart = normalizeWeekStart(req.query.weekStart || req.query.date);
+    const cached = getCachedWeeklyTaskBoard(weekStart);
+    res.json(cached || {
+      ok: true,
+      cached: false,
+      weekStart,
+      message: "No saved weekly task board for this week. Press Re-gen to create one.",
+    });
+  } catch (error) {
+    sendHttpError(res, error);
+  }
+});
+
+app.post("/weekly-tasks", async (req, res) => {
+  try {
+    assertWebAuth(req);
+    const weekStart = normalizeWeekStart(req.body.weekStart || req.body.date);
+    const regenerate = req.body.regenerate === true;
+    const result = regenerate
+      ? await createWeeklyTaskBoard(weekStart)
+      : getCachedWeeklyTaskBoard(weekStart);
+    res.json(result || {
+      ok: true,
+      cached: false,
+      weekStart,
+      message: "No saved weekly task board for this week. Send regenerate=true to create one.",
+    });
   } catch (error) {
     sendHttpError(res, error);
   }
@@ -930,6 +966,76 @@ async function handleDailyTaskSubmission(body) {
     actionsRequested: actions,
     actionsApplied: appliedActions,
   };
+}
+
+async function createWeeklyTaskBoard(weekStart = currentWeekStartBangkok()) {
+  validateRuntimeConfig();
+
+  const normalizedWeekStart = normalizeWeekStart(weekStart);
+  const sheets = await getSheetsClient();
+  const contexts = [];
+
+  for (const project of Object.values(PROJECTS)) {
+    contexts.push(await buildFullDailyTaskContext(sheets, project, normalizedWeekStart, normalizedWeekStart));
+  }
+
+  const response = await grok.chat.completions.create({
+    model: env.grokModel,
+    temperature: 0.1,
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content: [
+          PM_ASSISTANT_SYSTEM_PROMPT,
+          "Create a weekly work board for the whole game team.",
+          "The timeline sheet header schema is fixed and must be interpreted exactly as: ID, Rock, Priority, Task, Start, End, Blockers, Percent, Response, Sub Response, Status&LateDay.",
+          "Never ask to edit, rename, insert, delete, or overwrite these headers.",
+          "You must inspect 100% of the provided fullTimeline rows for both projects before assigning weekly work.",
+          "Weekly Tasks must answer: what should be finished by the end of this week, what late work must be recovered, and what can be advanced if there is spare capacity.",
+          "Every overdue row and every lowProgressDeadline row in scheduleSignals must appear in recoveryTasks or mustFinishThisWeek for its owner unless it is clearly complete.",
+          "Use Start/End to decide what belongs in this week. Use Percent and Status&LateDay to decide whether it is late, behind, or on track.",
+          "Plan realistically across the whole week. If a task cannot reach 100% this week, set targetPercent to the highest realistic weekly target and explain why.",
+          "Return only valid JSON with keys: headline, summary, people, weeklyRisks, finishByWeekEnd.",
+          "people is an array for every active team member. Each person has member, role, focus, mustFinishThisWeek, recoveryTasks, advanceTasks, risks.",
+          "Each task has id, project, title, why, targetPercent, currentPercent, priority, timelineRowNumber.",
+          "Keep Thai wording when the sheet context is Thai.",
+        ].join("\n"),
+      },
+      {
+        role: "user",
+        content: JSON.stringify({
+          weekStart: normalizedWeekStart,
+          weekEnd: weekEndFromStart(normalizedWeekStart),
+          team: teamPromptData(),
+          projects: contexts,
+          contextSummary: summarizeProjectContexts(contexts),
+          scheduleSignals: contexts.map((context) => context.scheduleSignals),
+        }),
+      },
+    ],
+  });
+
+  const parsed = parseJsonObject(response.choices?.[0]?.message?.content);
+  const people = enforceScheduleSignalWeeklyTasks(normalizeWeeklyTaskPeople(parsed.people), contexts);
+
+  const result = {
+    ok: true,
+    cached: false,
+    weekStart: normalizedWeekStart,
+    weekEnd: weekEndFromStart(normalizedWeekStart),
+    generatedAt: new Date().toISOString(),
+    headline: String(parsed.headline || "Weekly task board").trim(),
+    summary: String(parsed.summary || "").trim(),
+    people,
+    weeklyRisks: asArray(parsed.weeklyRisks),
+    finishByWeekEnd: asArray(parsed.finishByWeekEnd),
+    contextSummary: summarizeProjectContexts(contexts),
+    scheduleSignals: contexts.map((context) => context.scheduleSignals),
+  };
+
+  weeklyTaskCache.set(normalizedWeekStart, result);
+  return result;
 }
 
 async function createMilestoneReview(date = todayBangkok()) {
@@ -2160,6 +2266,11 @@ function getCachedDailyTaskBoard(date) {
   return cached ? { ...cached, cached: true } : null;
 }
 
+function getCachedWeeklyTaskBoard(weekStart) {
+  const cached = weeklyTaskCache.get(weekStart);
+  return cached ? { ...cached, cached: true } : null;
+}
+
 function getCachedMilestoneReview(date) {
   const cached = milestoneReviewCache.get(date);
   return cached ? { ...cached, cached: true } : null;
@@ -2823,6 +2934,12 @@ function currentWeekStartBangkok() {
   return monday.toLocaleDateString("en-CA", { timeZone: "Asia/Bangkok" });
 }
 
+function weekEndFromStart(weekStart) {
+  const start = new Date(`${normalizeWeekStart(weekStart)}T00:00:00+07:00`);
+  const end = new Date(start.getTime() + 6 * 24 * 60 * 60 * 1000);
+  return end.toLocaleDateString("en-CA", { timeZone: "Asia/Bangkok" });
+}
+
 function normalizeWeekStart(value) {
   if (!value) return currentWeekStartBangkok();
   const date = new Date(value);
@@ -3033,6 +3150,7 @@ function createAdminStatus(req) {
       weeklyPlan: "/weekly-plan",
       dailyTasks: "/daily-tasks",
       dailyTaskSubmit: "/daily-task-submit",
+      weeklyTasks: "/weekly-tasks",
       milestoneReview: "/milestone-review",
       timelineAnalysis: "/timeline-analysis",
       registerCommands: "/discord/register-commands",
@@ -3309,6 +3427,68 @@ function enforceScheduleSignalDailyTasks(people, contexts) {
 
       person.carryOverTasks.unshift({
         id: `late-${context.projectKey}-${item.rowNumber}`,
+        project: context.projectKey,
+        title: item.title || `Timeline row ${item.rowNumber}`,
+        why: [
+          `${item.reason}: row ${item.rowNumber}`,
+          item.deadlineDates?.length ? `End ${item.deadlineDates.map((date) => date.date).join(", ")}` : "",
+          item.status ? `Status ${item.status}` : "",
+          item.blockers ? `Blockers ${item.blockers}` : "",
+        ].filter(Boolean).join(" | "),
+        targetPercent: 100,
+        currentPercent: clampPercent(item.percent),
+        priority: "High",
+        timelineRowNumber: item.rowNumber,
+      });
+    }
+  }
+
+  return people;
+}
+
+function normalizeWeeklyTaskPeople(people) {
+  const byName = new Map(
+    (Array.isArray(people) ? people : [])
+      .map((person) => [normalizePersonName(person.member || person.name || person.developer), person])
+      .filter(([name]) => name && name !== "Unknown"),
+  );
+
+  return ACTIVE_TEAM_MEMBERS.map((member) => {
+    const person = byName.get(member.name) || {};
+    return {
+      member: member.name,
+      role: String(person.role || member.role || "").trim(),
+      focus: String(person.focus || "").trim(),
+      mustFinishThisWeek: normalizeDailyTasks(person.mustFinishThisWeek || person.weekTasks, "week-finish"),
+      recoveryTasks: normalizeDailyTasks(person.recoveryTasks || person.carryOverTasks, "week-recovery"),
+      advanceTasks: normalizeDailyTasks(person.advanceTasks, "week-advance"),
+      risks: asArray(person.risks),
+    };
+  });
+}
+
+function enforceScheduleSignalWeeklyTasks(people, contexts) {
+  const byName = new Map(people.map((person) => [person.member, person]));
+
+  for (const context of contexts) {
+    const requiredItems = [
+      ...context.scheduleSignals.overdue.map((item) => ({ ...item, reason: "Overdue recovery this week" })),
+      ...context.scheduleSignals.lowProgressDeadline.map((item) => ({ ...item, reason: "Low progress near deadline this week" })),
+      ...context.scheduleSignals.dueSoon.map((item) => ({ ...item, reason: "Due soon this week" })),
+    ];
+
+    for (const item of requiredItems) {
+      const owner = normalizePersonName(item.owner || "");
+      const memberName = owner === "Unknown" ? "\u0e17\u0e35\u0e19" : owner;
+      const person = byName.get(memberName) || byName.get("\u0e17\u0e35\u0e19");
+      if (!person) continue;
+
+      const alreadyExists = [...person.mustFinishThisWeek, ...person.recoveryTasks]
+        .some((task) => task.project === context.projectKey && task.timelineRowNumber === item.rowNumber);
+      if (alreadyExists) continue;
+
+      person.recoveryTasks.unshift({
+        id: `week-late-${context.projectKey}-${item.rowNumber}`,
         project: context.projectKey,
         title: item.title || `Timeline row ${item.rowNumber}`,
         why: [

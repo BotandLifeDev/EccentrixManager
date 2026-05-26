@@ -13,6 +13,9 @@ const dailyTaskBoard = document.querySelector("#dailyTaskBoard");
 const dailyTaskSummary = document.querySelector("#dailyTaskSummary");
 const dailyTaskMeta = document.querySelector("#dailyTaskMeta");
 const dailySubmitDeveloper = document.querySelector("#dailySubmitDeveloper");
+const weeklyTaskMeta = document.querySelector("#weeklyTaskMeta");
+const weeklyTaskSummary = document.querySelector("#weeklyTaskSummary");
+const weeklyTaskBoard = document.querySelector("#weeklyTaskBoard");
 const milestoneReviewMeta = document.querySelector("#milestoneReviewMeta");
 const milestoneReviewSummary = document.querySelector("#milestoneReviewSummary");
 const milestoneReviewGrid = document.querySelector("#milestoneReviewGrid");
@@ -32,6 +35,7 @@ bindForms();
 bindButtons();
 loadStatus();
 loadSavedDailyTasks();
+loadSavedWeeklyTasks();
 loadSavedMilestoneReview();
 
 function setDefaultDates() {
@@ -107,6 +111,14 @@ function bindButtons() {
 
   document.querySelector("#loadSavedDailyTasksBtn").addEventListener("click", async () => {
     await loadSavedDailyTasks();
+  });
+
+  document.querySelector("#loadSavedWeeklyBtn").addEventListener("click", async () => {
+    await loadSavedWeeklyTasks();
+  });
+
+  document.querySelector("#regenWeeklyBtn").addEventListener("click", async () => {
+    await regenerateWeeklyTasks();
   });
 
   document.querySelector("#loadSavedMilestoneBtn").addEventListener("click", async () => {
@@ -241,6 +253,65 @@ async function regenerateDailyTasks(form = document.querySelector("#dailyTaskLoa
   saveLocalDailyTasks(result);
   state.dailyTasks = result;
   renderDailyTasks(result);
+}
+
+async function loadSavedWeeklyTasks(form = document.querySelector("#dailyTaskLoadForm")) {
+  const button = document.querySelector("#loadSavedWeeklyBtn");
+  const weekStart = weekStartFromDate(form?.elements.date?.value || new Date().toISOString().slice(0, 10));
+  const local = loadLocalWeeklyTasks(weekStart);
+
+  if (local) {
+    state.weeklyTasks = local;
+    renderWeeklyTasks(local);
+  } else {
+    weeklyTaskBoard.innerHTML = '<div class="empty-state">No saved weekly tasks in this browser yet. Press Re-gen to create one.</div>';
+  }
+
+  const originalText = button?.textContent;
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Loading...";
+  }
+
+  try {
+    const result = await request(`/weekly-tasks?weekStart=${encodeURIComponent(weekStart)}`, { method: "GET" });
+    if (result?.people?.length) {
+      saveLocalWeeklyTasks(result);
+      state.weeklyTasks = result;
+      renderWeeklyTasks(result);
+    } else if (!local) {
+      weeklyTaskSummary.innerHTML = [
+        "<strong>No saved weekly task board loaded.</strong>",
+        `<span>${escapeHtml(result.message || "No saved weekly task board for this week.")}</span>`,
+      ].join("");
+    }
+  } catch (error) {
+    if (!local) {
+      weeklyTaskBoard.innerHTML = '<div class="empty-state">Saved weekly tasks could not be loaded. Check WEB_FORM_SECRET and API status.</div>';
+    }
+    print({ error: error.message });
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalText;
+    }
+  }
+}
+
+async function regenerateWeeklyTasks(form = document.querySelector("#dailyTaskLoadForm")) {
+  const button = document.querySelector("#regenWeeklyBtn");
+  const weekStart = weekStartFromDate(form?.elements.date?.value || new Date().toISOString().slice(0, 10));
+  weeklyTaskBoard.innerHTML = '<div class="empty-state">AI is planning the full week from both timelines...</div>';
+
+  const result = await postJson("/weekly-tasks", { weekStart, regenerate: true }, button);
+  if (!result) {
+    weeklyTaskBoard.innerHTML = '<div class="empty-state">Weekly tasks could not be loaded. Check WEB_FORM_SECRET and API status.</div>';
+    return;
+  }
+
+  saveLocalWeeklyTasks(result);
+  state.weeklyTasks = result;
+  renderWeeklyTasks(result);
 }
 
 async function loadSavedMilestoneReview(form = document.querySelector("#dailyTaskLoadForm")) {
@@ -452,6 +523,46 @@ function asTextList(value) {
   return [];
 }
 
+function renderWeeklyTasks(data) {
+  const people = Array.isArray(data.people) ? data.people : [];
+  const savedText = data.generatedAt ? ` Generated ${new Date(data.generatedAt).toLocaleString()}.` : "";
+  weeklyTaskMeta.textContent = `AI weekly plan for ${data.weekStart} to ${data.weekEnd || ""}.${savedText}`;
+  weeklyTaskSummary.innerHTML = [
+    `<strong>${escapeHtml(data.headline || "Weekly task board")}</strong>`,
+    `<span>${escapeHtml(formatWeeklySummary(data))}</span>`,
+  ].join("");
+  weeklyTaskBoard.innerHTML = people.length
+    ? people.map(renderWeeklyPersonTasks).join("")
+    : '<div class="empty-state">No weekly tasks returned by AI.</div>';
+}
+
+function formatWeeklySummary(data) {
+  const finish = asTextList(data.finishByWeekEnd).slice(0, 4).join(" | ");
+  const risks = asTextList(data.weeklyRisks).slice(0, 4).join(" | ");
+  const signals = formatSignalCounts(data.scheduleSignals);
+  return [
+    data.summary || "Review what should be completed this week.",
+    signals,
+    finish ? `Finish: ${finish}` : "",
+    risks ? `Risks: ${risks}` : "",
+  ].filter(Boolean).join(" ");
+}
+
+function renderWeeklyPersonTasks(person) {
+  return [
+    `<article class="person-card" data-member="${escapeHtml(person.member)}">`,
+    '<div class="person-head">',
+    `<div><h3>${escapeHtml(person.member)}</h3><p>${escapeHtml(person.role || "")}</p></div>`,
+    `<strong>${escapeHtml(person.focus || "Weekly focus")}</strong>`,
+    '</div>',
+    renderTaskGroup(person.member, "Must Finish", person.mustFinishThisWeek || []),
+    renderTaskGroup(person.member, "Late Recovery", person.recoveryTasks || []),
+    renderTaskGroup(person.member, "If Ahead", person.advanceTasks || []),
+    (person.risks || []).length ? `<div class="risk-list">${person.risks.map((risk) => `<span>${escapeHtml(risk)}</span>`).join("")}</div>` : "",
+    '</article>',
+  ].join("");
+}
+
 function renderMilestoneReview(data) {
   const projects = Array.isArray(data.projects) ? data.projects : [];
   const savedText = data.generatedAt ? ` Generated ${new Date(data.generatedAt).toLocaleString()}.` : "";
@@ -629,6 +740,31 @@ function loadLocalDailyTasks(date) {
   } catch (_error) {
     return null;
   }
+}
+
+function weeklyTaskStorageKey(weekStart) {
+  return `eccentrixWeeklyTasks:${weekStart}`;
+}
+
+function saveLocalWeeklyTasks(data) {
+  if (!data?.weekStart) return;
+  localStorage.setItem(weeklyTaskStorageKey(data.weekStart), JSON.stringify(data));
+}
+
+function loadLocalWeeklyTasks(weekStart) {
+  try {
+    return JSON.parse(localStorage.getItem(weeklyTaskStorageKey(weekStart)) || "null");
+  } catch (_error) {
+    return null;
+  }
+}
+
+function weekStartFromDate(value) {
+  const date = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return value;
+  const day = date.getDay() || 7;
+  date.setDate(date.getDate() - (day - 1));
+  return date.toISOString().slice(0, 10);
 }
 
 function milestoneStorageKey(date) {

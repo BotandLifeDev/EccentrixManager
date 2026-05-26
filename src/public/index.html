@@ -53,6 +53,24 @@
             <span>Saved daily tasks will load here. Press Re-gen only when you want AI to analyze the full timelines again.</span>
           </div>
 
+          <section class="weekly-review">
+            <div class="panel-head">
+              <div>
+                <h3>Weekly Tasks</h3>
+                <p class="panel-note" id="weeklyTaskMeta">AI weekly plan for both full project timelines.</p>
+              </div>
+              <div class="panel-actions">
+                <button type="button" id="loadSavedWeeklyBtn">Load Saved</button>
+                <button type="button" id="regenWeeklyBtn">Re-gen</button>
+              </div>
+            </div>
+            <div class="weekly-summary" id="weeklyTaskSummary">
+              <strong>No saved weekly task board loaded.</strong>
+              <span>Press Re-gen to analyze what should finish this week.</span>
+            </div>
+            <div class="weekly-board" id="weeklyTaskBoard" aria-live="polite"></div>
+          </section>
+
           <section class="milestone-review">
             <div class="panel-head">
               <div>

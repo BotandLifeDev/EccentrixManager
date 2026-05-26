@@ -285,6 +285,7 @@ h3 {
   line-height: 1.45;
 }
 
+.weekly-review,
 .milestone-review {
   display: grid;
   gap: 14px;
@@ -294,6 +295,7 @@ h3 {
   padding: 14px;
 }
 
+.weekly-summary,
 .milestone-summary {
   display: grid;
   gap: 6px;
@@ -307,6 +309,12 @@ h3 {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
+}
+
+.weekly-board {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
 }
 
 .milestone-card {
@@ -646,6 +654,7 @@ pre {
   .status-grid,
   .form-grid,
   .action-grid,
+  .weekly-board,
   .milestone-grid,
   .people-board,
   .chat-layout,

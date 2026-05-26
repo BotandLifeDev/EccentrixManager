@@ -141,12 +141,20 @@ function bindButtons() {
     await regenerateWeeklyTasks();
   });
 
+  document.querySelector("#submitWeeklySelectedBtn").addEventListener("click", async (event) => {
+    await submitSelectedTaskBoard(weeklyTaskBoard, "weekly", event.currentTarget);
+  });
+
   document.querySelector("#loadSavedMilestoneBtn").addEventListener("click", async () => {
     await loadSavedMilestoneReview();
   });
 
   document.querySelector("#regenMilestoneBtn").addEventListener("click", async () => {
     await regenerateMilestoneReview();
+  });
+
+  document.querySelector("#submitDailySelectedBtn").addEventListener("click", async (event) => {
+    await submitSelectedTaskBoard(dailyTaskBoard, "daily", event.currentTarget);
   });
 
   document.querySelector("#dailyTaskSubmitForm").addEventListener("submit", async (event) => {
@@ -416,6 +424,23 @@ async function submitDailyTasks(form) {
     form.elements.note.value = "";
     print(result);
   }
+}
+
+async function submitSelectedTaskBoard(board, scope, button) {
+  const date = document.querySelector("#dailyTaskLoadForm")?.elements.date?.value || new Date().toISOString().slice(0, 10);
+  const progressItems = collectProgressItemsFromBoard(board);
+
+  if (progressItems.length === 0) {
+    print(`Choose at least one ${scope} task before submitting.`);
+    return;
+  }
+
+  await postJson("/daily-task-submit", {
+    date,
+    developer: "Team",
+    note: `${scope === "weekly" ? "Weekly" : "Daily"} selected slider progress submission.`,
+    progressItems,
+  }, button);
 }
 
 async function postJson(endpoint, body, button) {
@@ -717,9 +742,15 @@ function renderTaskRow(member, group, task) {
 }
 
 function collectDailyProgressItems(developer) {
-  return [...dailyTaskBoard.querySelectorAll(`.task-row[data-member="${cssEscape(developer)}"]`)]
+  return collectProgressItemsFromBoard(dailyTaskBoard)
+    .filter((item) => item.member === developer);
+}
+
+function collectProgressItemsFromBoard(board) {
+  return [...board.querySelectorAll(".task-row")]
     .filter((row) => row.querySelector('input[type="checkbox"]').checked)
     .map((row) => ({
+      member: row.dataset.member || "",
       title: row.dataset.title || "",
       project: row.dataset.project || "",
       timelineRowNumber: row.dataset.rowNumber || "",

@@ -930,6 +930,7 @@ async function handleDailyTaskSubmission(body) {
           "Convert a daily task submission into focused Google Sheet updates.",
           "Return only valid JSON with keys: reply, actions, visualProgressOverview.",
           "Supported actions: patch_sheet_cells and save_update.",
+          "progressItems may include member when the submission comes from selected Daily or Weekly task sliders. Treat member as the owner/person who updated that task.",
           "Prefer patch_sheet_cells when the submitted item has a valid project and timelineRowNumber.",
           "For patch_sheet_cells use project, sheet='timeline', updates with rowNumber, field, value.",
           "Timeline headers are fixed: ID, Rock, Priority, Task, Start, End, Blockers, Percent, Response, Sub Response, Status&LateDay.",

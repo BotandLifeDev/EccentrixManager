@@ -73,6 +73,7 @@
               <div class="panel-actions">
                 <button type="button" id="loadSavedWeeklyBtn">Load Saved</button>
                 <button type="button" id="regenWeeklyBtn">Re-gen</button>
+                <button type="button" id="submitWeeklySelectedBtn">Submit Selected</button>
                 <button type="button" class="section-toggle" data-toggle-section="weeklyTasks">Show</button>
               </div>
             </div>
@@ -112,7 +113,10 @@
                 <h3>Daily Task List</h3>
                 <p class="panel-note">Today, carry-over, and ahead-of-time tasks by person.</p>
               </div>
-              <button type="button" class="section-toggle" data-toggle-section="dailyTasksList">Show</button>
+              <div class="panel-actions">
+                <button type="button" id="submitDailySelectedBtn">Submit Selected</button>
+                <button type="button" class="section-toggle" data-toggle-section="dailyTasksList">Show</button>
+              </div>
             </div>
             <div class="section-body">
               <div class="people-board" id="dailyTaskBoard" aria-live="polite"></div>

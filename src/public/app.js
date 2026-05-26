@@ -677,7 +677,7 @@ function renderTaskRow(member, group, task) {
     ` data-project="${escapeHtml(project)}"`,
     ` data-row-number="${escapeHtml(task.timelineRowNumber || "")}">`,
     '<label class="task-check">',
-    '<input type="checkbox" checked>',
+    '<input type="checkbox">',
     '<span></span>',
     '</label>',
     '<div class="task-main">',

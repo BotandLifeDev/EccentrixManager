@@ -784,7 +784,15 @@ function weekStartFromDate(value) {
   if (Number.isNaN(date.getTime())) return value;
   const day = date.getDay() || 7;
   date.setDate(date.getDate() - (day - 1));
-  return date.toISOString().slice(0, 10);
+  return formatLocalDate(date);
+}
+
+function formatLocalDate(date) {
+  return [
+    String(date.getFullYear()).padStart(4, "0"),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  ].join("-");
 }
 
 function milestoneStorageKey(date) {

@@ -912,6 +912,7 @@ async function handleDailyTaskSubmission(body) {
   }
 
   const sheets = await getSheetsClient();
+  const directProgressAction = await applySubmittedProgressPercents(sheets, progressItems);
   const weekStart = normalizeWeekStart(date);
   const contexts = [];
 
@@ -957,7 +958,10 @@ async function handleDailyTaskSubmission(body) {
 
   const parsed = parseJsonObject(response.choices?.[0]?.message?.content);
   const actions = Array.isArray(parsed.actions) ? parsed.actions : [];
-  const appliedActions = await executeAssistantActions(actions, { confirmSend: false });
+  const appliedActions = [
+    directProgressAction,
+    ...await executeAssistantActions(actions, { confirmSend: false }),
+  ].filter(Boolean);
 
   return {
     ok: true,
@@ -967,6 +971,54 @@ async function handleDailyTaskSubmission(body) {
     visualProgressOverview: parsed.visualProgressOverview || null,
     actionsRequested: actions,
     actionsApplied: appliedActions,
+  };
+}
+
+async function applySubmittedProgressPercents(sheets, progressItems) {
+  const updatesByProject = new Map();
+
+  for (const item of progressItems) {
+    if (!item.project || !item.timelineRowNumber) continue;
+    if (item.timelineRowNumber <= 1) continue;
+
+    const project = resolveProject(item.project);
+    if (!updatesByProject.has(project.key)) {
+      updatesByProject.set(project.key, { project, rows: new Map() });
+    }
+
+    updatesByProject.get(project.key).rows.set(item.timelineRowNumber, item.percent);
+  }
+
+  const projects = [];
+
+  for (const { project, rows } of updatesByProject.values()) {
+    await ensureHeader(sheets, project, project.sheetName, TIMELINE_HEADERS);
+    const ranges = [...rows.entries()].map(([rowNumber, percent]) => ({
+      range: `${quoteSheet(project.sheetName)}!H${rowNumber}`,
+      values: [[percent]],
+    }));
+
+    if (ranges.length > 0) {
+      await batchUpdateValueRanges(sheets, project.spreadsheetId, ranges);
+    }
+
+    projects.push({
+      key: project.key,
+      label: project.label,
+      editedCells: ranges.length,
+      rowNumbers: [...rows.keys()],
+    });
+  }
+
+  const editedCells = projects.reduce((total, project) => total + project.editedCells, 0);
+  if (editedCells === 0) return null;
+
+  return {
+    type: "direct_progress_percent_update",
+    ok: true,
+    field: "Percent",
+    editedCells,
+    projects,
   };
 }
 
@@ -1118,7 +1170,7 @@ async function createMilestoneReview(date = todayBangkok()) {
 async function executeAssistantActions(actions, options = {}) {
   const results = [];
 
-  for (const action of actions.slice(0, 5)) {
+  for (const action of actions.slice(0, 50)) {
     const type = String(action.type || "").trim();
 
     if (type === "save_update") {

@@ -906,6 +906,13 @@ function formatContextSummary(summary) {
 }
 
 function formatAppliedAction(item) {
+  if (item.type === "direct_progress_percent_update") {
+    const projects = item.projects
+      .map((project) => `${project.label}: ${project.editedCells} cells`)
+      .join(", ");
+    return `- ${item.type}: ${item.field}, edited ${item.editedCells} cells (${projects})`;
+  }
+
   if (item.type === "update_timeline_field") {
     const projects = item.projects
       .map((project) => `${project.label}: ${project.editedCells} cells`)

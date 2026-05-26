@@ -184,6 +184,7 @@ const env = {
   discordUpdateChannelId: process.env.DISCORD_UPDATE_CHANNEL_ID,
   discordReportChannelId: process.env.DISCORD_REPORT_CHANNEL_ID,
   dailyReportTime: process.env.DAILY_REPORT_TIME || "21:00",
+  dailyTaskTime: process.env.DAILY_TASK_TIME || "06:00",
   timelineContextLimit: Number(process.env.TIMELINE_CONTEXT_LIMIT || 1000),
   enableDiscordBot: process.env.ENABLE_DISCORD_BOT === "true",
   cronSecret: process.env.CRON_SECRET,
@@ -414,6 +415,27 @@ app.post("/assistant/chat", async (req, res) => {
     assertWebAuth(req);
     const result = await handleAssistantChat(req.body);
     res.json(result);
+  } catch (error) {
+    sendHttpError(res, error);
+  }
+});
+
+app.post("/daily-tasks", async (req, res) => {
+  try {
+    assertWebAuth(req);
+    const date = normalizeDate(req.body.date);
+    const result = await createDailyTaskBoard(date);
+    res.json(result);
+  } catch (error) {
+    sendHttpError(res, error);
+  }
+});
+
+app.post("/daily-task-submit", async (req, res) => {
+  try {
+    assertWebAuth(req);
+    const result = await handleDailyTaskSubmission(req.body);
+    res.status(201).json(result);
   } catch (error) {
     sendHttpError(res, error);
   }
@@ -671,6 +693,137 @@ async function handleAssistantChat(body) {
       : {}),
     reply: buildAssistantReply(parsed.reply, actions, appliedActions),
     contextSummary,
+    visualProgressOverview: parsed.visualProgressOverview || null,
+    actionsRequested: actions,
+    actionsApplied: appliedActions,
+  };
+}
+
+async function createDailyTaskBoard(date = todayBangkok()) {
+  validateRuntimeConfig();
+
+  const sheets = await getSheetsClient();
+  const weekStart = normalizeWeekStart(date);
+  const contexts = [];
+
+  for (const project of Object.values(PROJECTS)) {
+    contexts.push(await buildProjectManagementContext(sheets, project, weekStart));
+  }
+
+  const response = await grok.chat.completions.create({
+    model: env.grokModel,
+    temperature: 0.2,
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content: [
+          PM_ASSISTANT_SYSTEM_PROMPT,
+          "Create a daily work board for a small game team every morning at 06:00 Bangkok time.",
+          "Analyze both project timelines, current weekly plans, targets, open feedback, blockers, and recent updates.",
+          "Return only valid JSON with keys: headline, summary, people.",
+          "people is an array for every active team member. Each person has member, role, focus, todayTasks, carryOverTasks, advanceTasks, risks.",
+          "Each task has id, project, title, why, targetPercent, currentPercent, priority, timelineRowNumber.",
+          "todayTasks are tasks that should be completed today or should reach a target percent today.",
+          "carryOverTasks are unfinished tasks from previous days.",
+          "advanceTasks are recommended ahead-of-schedule tasks for spare time.",
+          "Use timelineRowNumber when a task maps to a provided timeline row; otherwise use null.",
+          "Percent values must be numbers from 0 to 100. Keep Thai task wording when the sheet context is Thai.",
+        ].join("\n"),
+      },
+      {
+        role: "user",
+        content: JSON.stringify({
+          today: date,
+          morningReviewTime: env.dailyTaskTime,
+          team: teamPromptData(),
+          projects: contexts,
+          contextSummary: summarizeProjectContexts(contexts),
+        }),
+      },
+    ],
+  });
+
+  const parsed = parseJsonObject(response.choices?.[0]?.message?.content);
+  const people = normalizeDailyTaskPeople(parsed.people);
+
+  return {
+    ok: true,
+    date,
+    generatedAt: new Date().toISOString(),
+    morningReviewTime: env.dailyTaskTime,
+    headline: String(parsed.headline || "Daily task board").trim(),
+    summary: String(parsed.summary || "").trim(),
+    people,
+    contextSummary: summarizeProjectContexts(contexts),
+  };
+}
+
+async function handleDailyTaskSubmission(body) {
+  validateRuntimeConfig();
+
+  const date = normalizeDate(body.date);
+  const developer = normalizePersonName(body.developer || body.member || body.name || "Unknown");
+  const note = String(body.note || body.text || body.message || "").trim();
+  const progressItems = normalizeDailyProgressItems(body.progressItems);
+
+  if (progressItems.length === 0 && !note) {
+    const error = new Error("Missing progress items or note");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const sheets = await getSheetsClient();
+  const weekStart = normalizeWeekStart(date);
+  const contexts = [];
+
+  for (const project of Object.values(PROJECTS)) {
+    contexts.push(await buildProjectManagementContext(sheets, project, weekStart));
+  }
+
+  const response = await grok.chat.completions.create({
+    model: env.grokModel,
+    temperature: 0.15,
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content: [
+          PM_ASSISTANT_SYSTEM_PROMPT,
+          "Convert a daily task submission into focused Google Sheet updates.",
+          "Return only valid JSON with keys: reply, actions, visualProgressOverview.",
+          "Supported actions: patch_sheet_cells and save_update.",
+          "Prefer patch_sheet_cells when the submitted item has a valid project and timelineRowNumber.",
+          "For patch_sheet_cells use project, sheet='timeline', updates with rowNumber, field, value.",
+          "Useful timeline fields are Summary, Completed, In Progress, Blockers, Next Steps, Tags, Confidence.",
+          "Use save_update when progress cannot be mapped to an existing row.",
+          "Keep updates concise. Preserve Thai wording from the submission when writing to sheets.",
+        ].join("\n"),
+      },
+      {
+        role: "user",
+        content: JSON.stringify({
+          date,
+          developer,
+          note,
+          progressItems,
+          team: teamPromptData(),
+          projects: contexts,
+          contextSummary: summarizeProjectContexts(contexts),
+        }),
+      },
+    ],
+  });
+
+  const parsed = parseJsonObject(response.choices?.[0]?.message?.content);
+  const actions = Array.isArray(parsed.actions) ? parsed.actions : [];
+  const appliedActions = await executeAssistantActions(actions, { confirmSend: false });
+
+  return {
+    ok: true,
+    date,
+    developer,
+    reply: buildAssistantReply(parsed.reply, actions, appliedActions),
     visualProgressOverview: parsed.visualProgressOverview || null,
     actionsRequested: actions,
     actionsApplied: appliedActions,
@@ -2416,6 +2569,7 @@ function createAdminStatus(req) {
     app: "Eccentrix Timeline Manager",
     date: todayBangkok(),
     dailyReportTime: env.dailyReportTime,
+    dailyTaskTime: env.dailyTaskTime,
     auth: {
       webFormSecretEnabled: Boolean(env.webFormSecret),
       cronSecretEnabled: Boolean(env.cronSecret),
@@ -2459,6 +2613,8 @@ function createAdminStatus(req) {
       feedback: "/feedback",
       weeklyTarget: "/weekly-target",
       weeklyPlan: "/weekly-plan",
+      dailyTasks: "/daily-tasks",
+      dailyTaskSubmit: "/daily-task-submit",
       timelineAnalysis: "/timeline-analysis",
       registerCommands: "/discord/register-commands",
       testReport: "/discord/test-report",
@@ -2646,6 +2802,75 @@ function normalizePlanTask(task) {
     dependencies: String(task.dependencies || task.dependency || "").trim(),
     status: String(task.status || "Planned").trim(),
   };
+}
+
+function normalizeDailyTaskPeople(people) {
+  const byName = new Map(
+    (Array.isArray(people) ? people : [])
+      .map((person) => [normalizePersonName(person.member || person.name || person.developer), person])
+      .filter(([name]) => name && name !== "Unknown"),
+  );
+
+  return ACTIVE_TEAM_MEMBERS.map((member) => {
+    const person = byName.get(member.name) || {};
+    return {
+      member: member.name,
+      role: String(person.role || member.role || "").trim(),
+      focus: String(person.focus || "").trim(),
+      todayTasks: normalizeDailyTasks(person.todayTasks, "today"),
+      carryOverTasks: normalizeDailyTasks(person.carryOverTasks, "carry-over"),
+      advanceTasks: normalizeDailyTasks(person.advanceTasks, "advance"),
+      risks: asArray(person.risks),
+    };
+  });
+}
+
+function normalizeDailyTasks(tasks, fallbackPrefix) {
+  return (Array.isArray(tasks) ? tasks : [])
+    .map((task, index) => {
+      const project = normalizeProjectKey(task.project || task.game);
+      const title = String(task.title || task.task || task.description || "").trim();
+      if (!title) return null;
+
+      return {
+        id: String(task.id || `${fallbackPrefix}-${index + 1}`).trim(),
+        project,
+        title,
+        why: String(task.why || task.reason || "").trim(),
+        targetPercent: clampPercent(task.targetPercent ?? task.target ?? task.percent),
+        currentPercent: clampPercent(task.currentPercent ?? task.current ?? 0),
+        priority: String(task.priority || "Medium").trim(),
+        timelineRowNumber: normalizeOptionalRowNumber(task.timelineRowNumber || task.rowNumber || task.row),
+      };
+    })
+    .filter(Boolean);
+}
+
+function normalizeDailyProgressItems(items) {
+  return (Array.isArray(items) ? items : [])
+    .map((item) => {
+      const title = String(item.title || item.task || "").trim();
+      const project = normalizeProjectKey(item.project || item.game);
+      const percent = clampPercent(item.percent ?? item.currentPercent ?? item.donePercent);
+      const timelineRowNumber = normalizeOptionalRowNumber(item.timelineRowNumber || item.rowNumber || item.row);
+      const status = String(item.status || "").trim();
+      const note = String(item.note || item.comment || "").trim();
+
+      if (!title && !note) return null;
+      return { title, project, percent, timelineRowNumber, status, note };
+    })
+    .filter(Boolean);
+}
+
+function clampPercent(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return Math.max(0, Math.min(100, Math.round(number)));
+}
+
+function normalizeOptionalRowNumber(value) {
+  const rowNumber = Number(value);
+  return Number.isInteger(rowNumber) && rowNumber >= 2 ? rowNumber : null;
 }
 
 function headersForSheet(project, sheetName) {

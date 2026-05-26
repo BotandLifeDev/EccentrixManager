@@ -25,7 +25,8 @@
       <section class="status-grid" id="statusGrid" aria-live="polite"></section>
 
       <nav class="tabs" aria-label="Dashboard sections">
-        <button class="tab is-active" type="button" data-panel="workPanel">Update</button>
+        <button class="tab is-active" type="button" data-panel="dailyTasksPanel">Daily Tasks</button>
+        <button class="tab" type="button" data-panel="workPanel">Update</button>
         <button class="tab" type="button" data-panel="chatPanel">AI Chat</button>
         <button class="tab" type="button" data-panel="feedbackPanel">Feedback</button>
         <button class="tab" type="button" data-panel="planningPanel">Plan</button>
@@ -34,7 +35,48 @@
       </nav>
 
       <section class="workspace">
-        <form class="panel is-active" id="workPanel" data-endpoint="/updates">
+        <section class="panel is-active" id="dailyTasksPanel">
+          <div class="panel-head">
+            <div>
+              <h2>Daily Tasks</h2>
+              <p class="panel-note" id="dailyTaskMeta">AI review for both games at 06:00 Bangkok time.</p>
+            </div>
+            <form class="daily-load-form" id="dailyTaskLoadForm">
+              <input name="date" type="date" aria-label="Daily task date">
+              <button type="submit">Generate</button>
+            </form>
+          </div>
+
+          <div class="daily-summary" id="dailyTaskSummary">
+            <strong>Morning task board</strong>
+            <span>Generate today&apos;s AI task list to see work by person, carry-over items, and advance suggestions.</span>
+          </div>
+
+          <div class="people-board" id="dailyTaskBoard" aria-live="polite"></div>
+
+          <form class="daily-submit" id="dailyTaskSubmitForm">
+            <div class="panel-head">
+              <div>
+                <h3>Submit Work</h3>
+                <p class="panel-note">Adjust today&apos;s percentages, add notes, then send them to AI to update the timeline.</p>
+              </div>
+              <button type="submit">Send To AI</button>
+            </div>
+            <div class="form-grid">
+              <label>Name
+                <select name="developer" required id="dailySubmitDeveloper"></select>
+              </label>
+              <label>Date
+                <input name="date" type="date">
+              </label>
+              <label class="wide">Submission note
+                <textarea name="note" rows="4" placeholder="What was completed, what is blocked, and what changed today"></textarea>
+              </label>
+            </div>
+          </form>
+        </section>
+
+        <form class="panel" id="workPanel" data-endpoint="/updates">
           <div class="panel-head">
             <h2>อัปเดตงาน</h2>
             <button type="submit">Save Update</button>

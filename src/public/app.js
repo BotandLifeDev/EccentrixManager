@@ -708,6 +708,7 @@ function renderTaskRow(member, group, task) {
   const current = Number(task.currentPercent || 0);
   const target = Number(task.targetPercent || 0);
   const project = task.project || "";
+  const rock = String(task.rock || "").trim();
 
   return [
     '<div class="task-row"',
@@ -715,6 +716,7 @@ function renderTaskRow(member, group, task) {
     ` data-group="${escapeHtml(group)}"`,
     ` data-title="${escapeHtml(task.title)}"`,
     ` data-project="${escapeHtml(project)}"`,
+    ` data-rock="${escapeHtml(rock)}"`,
     ` data-row-number="${escapeHtml(task.timelineRowNumber || "")}">`,
     '<label class="task-check">',
     '<input type="checkbox">',
@@ -725,6 +727,7 @@ function renderTaskRow(member, group, task) {
     `<strong>${escapeHtml(task.title)}</strong>`,
     `<span>${escapeHtml(projectLabel(project))}</span>`,
     '</div>',
+    `<div class="task-meta-line"><span>Rock: ${escapeHtml(rock || "Not specified")}</span></div>`,
     `<p>${escapeHtml(task.why || "Target today")}</p>`,
     '<div class="percent-control">',
     `<input type="range" min="0" max="100" step="5" value="${current}" aria-label="Task percent">`,
@@ -757,6 +760,7 @@ function collectProgressItemsFromBoard(board) {
       member: row.dataset.member || "",
       title: row.dataset.title || "",
       project: row.dataset.project || "",
+      rock: row.dataset.rock || "",
       timelineRowNumber: row.dataset.rowNumber || "",
       percent: row.querySelector('input[type="range"]').value,
       currentPercent: row.querySelector('input[type="range"]').value,

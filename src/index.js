@@ -844,7 +844,7 @@ async function createDailyTaskBoard(date = todayBangkok()) {
           "Do not rely only on recent rows. Use rowCounts to confirm timelineSentToAi equals meaningfulTimeline for each project.",
           "scheduleSignals is precomputed by the backend from the full timeline. Overdue, dueSoon, activeWindow, blocked, and lowProgressDeadline rows must be considered high priority evidence.",
           "First analyze project problems, blockers, stale work, dependencies, owner workload, dates, time pressure, and deadline risk from every available timeline column.",
-          "Use Start as the planned start date, End as the deadline/end date, Percent as completion percentage, Blockers as blocking issues, Priority as urgency, Task as the work item, Response/Sub Response as owner or response context, and Status&LateDay as late/status signal.",
+          "Use Start as the planned start date, End as the deadline/end date, Percent as completion percentage, Blockers as blocking issues, Priority as urgency, Task as the work item, Rock as milestone/rock grouping, Response/Sub Response as owner or response context, and Status&LateDay as late/status signal.",
           "Generate daily tasks only after that analysis. Today tasks must be tied to deadline pressure, carry-over risk, blockers, scheduleSignals, or current plan priorities.",
           "Every overdue row and every lowProgressDeadline row in scheduleSignals must appear in todayTasks or carryOverTasks for its owner unless it is clearly complete.",
           "Daily Tasks must be a recovery plan for all late work, not only a summary of recent updates.",
@@ -852,7 +852,8 @@ async function createDailyTaskBoard(date = todayBangkok()) {
           "Return only valid JSON with keys: headline, summary, timelineAnalysis, people.",
           "timelineAnalysis has projectFindings, deadlineRisks, blockedOrLateWork, workloadNotes, assumptions.",
           "people is an array for every active team member. Each person has member, role, focus, todayTasks, carryOverTasks, advanceTasks, risks.",
-          "Each task has id, project, title, why, targetPercent, currentPercent, priority, timelineRowNumber.",
+          "Each task has id, project, rock, title, why, targetPercent, currentPercent, priority, timelineRowNumber.",
+          "The rock field must come from the Rock column for mapped timeline rows. If no Rock is available, use an empty string.",
           "todayTasks are tasks that should be completed today or should reach a target percent today.",
           "carryOverTasks are unfinished tasks from previous days.",
           "advanceTasks are recommended ahead-of-schedule tasks for spare time.",
@@ -930,7 +931,7 @@ async function handleDailyTaskSubmission(body) {
           "Convert a daily task submission into focused Google Sheet updates.",
           "Return only valid JSON with keys: reply, actions, visualProgressOverview.",
           "Supported actions: patch_sheet_cells and save_update.",
-          "progressItems may include member when the submission comes from selected Daily or Weekly task sliders. Treat member as the owner/person who updated that task.",
+          "progressItems may include member and rock when the submission comes from selected Daily or Weekly task sliders. Treat member as the owner/person who updated that task. Use rock as supporting context only; do not overwrite Rock unless explicitly requested.",
           "Prefer patch_sheet_cells when the submitted item has a valid project and timelineRowNumber.",
           "For patch_sheet_cells use project, sheet='timeline', updates with rowNumber, field, value.",
           "Timeline headers are fixed: ID, Rock, Priority, Task, Start, End, Blockers, Percent, Response, Sub Response, Status&LateDay.",
@@ -999,7 +1000,8 @@ async function createWeeklyTaskBoard(weekStart = currentWeekStartBangkok()) {
           "Plan realistically across the whole week. If a task cannot reach 100% this week, set targetPercent to the highest realistic weekly target and explain why.",
           "Return only valid JSON with keys: headline, summary, people, weeklyRisks, finishByWeekEnd.",
           "people is an array for every active team member. Each person has member, role, focus, mustFinishThisWeek, recoveryTasks, advanceTasks, risks.",
-          "Each task has id, project, title, why, targetPercent, currentPercent, priority, timelineRowNumber.",
+          "Each task has id, project, rock, title, why, targetPercent, currentPercent, priority, timelineRowNumber.",
+          "The rock field must come from the Rock column for mapped timeline rows. If no Rock is available, use an empty string.",
           "Keep Thai wording when the sheet context is Thai.",
         ].join("\n"),
       },
@@ -2320,6 +2322,7 @@ function buildScheduleSignals(project, fullTimeline, reviewDate) {
 
     const item = {
       rowNumber: row.rowNumber,
+      rock: row.rock || "",
       title: analysis.title,
       owner: analysis.owner,
       status: analysis.status,
@@ -3380,6 +3383,7 @@ function normalizeDailyTasks(tasks, fallbackPrefix) {
       return {
         id: String(task.id || `${fallbackPrefix}-${index + 1}`).trim(),
         project,
+        rock: String(task.rock || task.milestone || task.group || "").trim(),
         title,
         why: String(task.why || task.reason || "").trim(),
         targetPercent: clampPercent(task.targetPercent ?? task.target ?? task.percent),
@@ -3400,9 +3404,10 @@ function normalizeDailyProgressItems(items) {
       const timelineRowNumber = normalizeOptionalRowNumber(item.timelineRowNumber || item.rowNumber || item.row);
       const status = String(item.status || "").trim();
       const note = String(item.note || item.comment || "").trim();
+      const rock = String(item.rock || item.milestone || item.group || "").trim();
 
       if (!title && !note) return null;
-      return { title, project, percent, timelineRowNumber, status, note };
+      return { title, project, rock, percent, timelineRowNumber, status, note };
     })
     .filter(Boolean);
 }
@@ -3429,6 +3434,7 @@ function enforceScheduleSignalDailyTasks(people, contexts) {
       person.carryOverTasks.unshift({
         id: `late-${context.projectKey}-${item.rowNumber}`,
         project: context.projectKey,
+        rock: item.rock || "",
         title: item.title || `Timeline row ${item.rowNumber}`,
         why: [
           `${item.reason}: row ${item.rowNumber}`,
@@ -3491,6 +3497,7 @@ function enforceScheduleSignalWeeklyTasks(people, contexts) {
       person.recoveryTasks.unshift({
         id: `week-late-${context.projectKey}-${item.rowNumber}`,
         project: context.projectKey,
+        rock: item.rock || "",
         title: item.title || `Timeline row ${item.rowNumber}`,
         why: [
           `${item.reason}: row ${item.rowNumber}`,

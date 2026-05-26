@@ -523,6 +523,23 @@ h3 {
   white-space: nowrap;
 }
 
+.task-meta-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.task-meta-line span {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--accent-2);
+  padding: 4px 8px;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
 .percent-control {
   display: grid;
   grid-template-columns: 1fr minmax(92px, auto) minmax(84px, auto);

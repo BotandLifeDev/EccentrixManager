@@ -3373,6 +3373,16 @@ function possibleSheetDates(value) {
   const dates = new Set();
   if (!input) return dates;
 
+  const exactIsoDateTime = input.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?$/);
+  if (exactIsoDateTime) {
+    const normalized = formatDateParts(
+      normalizeCalendarYear(Number(exactIsoDateTime[1])),
+      Number(exactIsoDateTime[2]),
+      Number(exactIsoDateTime[3]),
+    );
+    return new Set(normalized ? [normalized] : []);
+  }
+
   if (typeof value === "number" || /^\d+(\.\d+)?$/.test(input)) {
     const serial = Number(value);
     if (Number.isFinite(serial) && serial > 20000 && serial < 80000) {
@@ -3386,7 +3396,9 @@ function possibleSheetDates(value) {
     dates.add(formatDateParts(normalizeCalendarYear(Number(iso[1])), Number(iso[2]), Number(iso[3])));
   }
 
-  const weekdayDateMatches = input.matchAll(
+  const nonIsoInput = input.replace(/\d{4}-\d{1,2}-\d{1,2}(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?/g, " ");
+
+  const weekdayDateMatches = nonIsoInput.matchAll(
     /\b(?:sun|mon|tue|tues|wed|thu|thur|thurs|fri|sat)[a-z]*\.?\s+(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})\b/gi,
   );
   for (const match of weekdayDateMatches) {
@@ -3396,7 +3408,7 @@ function possibleSheetDates(value) {
     dates.add(formatDateParts(year, month, day));
   }
 
-  const slashMatches = input.matchAll(/(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})/g);
+  const slashMatches = nonIsoInput.matchAll(/(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})/g);
   for (const slash of slashMatches) {
     const first = Number(slash[1]);
     const second = Number(slash[2]);

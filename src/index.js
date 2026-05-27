@@ -2527,9 +2527,9 @@ function filterTimelineRowsForAi(rows, options = {}) {
   return rows.filter((row) => {
     const info = getTimelineRowScheduleInfo(row);
     if (info.isComplete) return false;
-    if (info.times.length === 0) return false;
-    if (info.times.some((time) => time >= startTime && time <= endTime)) return true;
-    return info.times.some((time) => time < reviewTime);
+    if (info.allTimes.length === 0) return false;
+    if (info.allTimes.some((time) => time >= startTime && time <= endTime)) return true;
+    return info.endTimes.some((time) => time < reviewTime);
   });
 }
 
@@ -2563,16 +2563,15 @@ function buildTimelineFilterSummary(mode, reviewDate, weekStart) {
 
 function getTimelineRowScheduleInfo(row) {
   const fields = row.fields || {};
-  const values = [
-    fields.Start,
-    fields.End,
-    row.start,
-    row.end,
-  ];
-  const times = values
+  const startTimes = [fields.Start, row.start]
     .flatMap((value) => [...possibleSheetDates(value)])
     .map(dateToBangkokTime)
     .filter((time) => Number.isFinite(time));
+  const endTimes = [fields.End, row.end]
+    .flatMap((value) => [...possibleSheetDates(value)])
+    .map(dateToBangkokTime)
+    .filter((time) => Number.isFinite(time));
+  const allTimes = [...startTimes, ...endTimes];
   const percent = clampPercent(row.percent ?? row.pct ?? fields.Percent);
   const statusText = [
     row.statusLateDay,
@@ -2585,7 +2584,9 @@ function getTimelineRowScheduleInfo(row) {
   ].map(cleanSheetCellValue).join(" ").toLowerCase();
 
   return {
-    times,
+    startTimes,
+    endTimes,
+    allTimes,
     percent,
     isComplete: percent >= 100 || /(^|\b)(done|complete|completed|finished|closed)(\b|$)|เสร็จ|ปิดงาน/.test(statusText),
   };
@@ -3793,7 +3794,7 @@ function timelineContextRowToTask(context, sourceRow, reviewDate, scope) {
   const schedule = getTimelineRowScheduleInfo(row);
   const owner = resolveTaskOwner(row);
   const currentPercent = clampPercent(row.pct);
-  const isOverdue = schedule.times.some((time) => time < dateToBangkokTime(reviewDate));
+  const isOverdue = schedule.endTimes.some((time) => time < dateToBangkokTime(reviewDate));
   const dateReason = formatTaskDateReason(row, isOverdue, scope);
 
   return {
@@ -4097,7 +4098,8 @@ function averagePercent(projects) {
 }
 
 function clampPercent(value) {
-  const number = Number(value);
+  const match = String(value ?? "").match(/\d{1,3}(?:\.\d+)?/);
+  const number = match ? Number(match[0]) : Number(value);
   if (!Number.isFinite(number)) return 0;
   return Math.max(0, Math.min(100, Math.round(number)));
 }

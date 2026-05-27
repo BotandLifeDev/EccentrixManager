@@ -1014,7 +1014,10 @@ async function applySubmittedProgressPercents(sheets, progressItems) {
       updatesByProject.set(project.key, { project, rows: new Map() });
     }
 
-    updatesByProject.get(project.key).rows.set(item.timelineRowNumber, item.percent);
+    updatesByProject.get(project.key).rows.set(
+      item.timelineRowNumber,
+      formatPercentForSheet(item.percent),
+    );
   }
 
   const projects = [];
@@ -1048,6 +1051,10 @@ async function applySubmittedProgressPercents(sheets, progressItems) {
     editedCells,
     projects,
   };
+}
+
+function formatPercentForSheet(value) {
+  return clampPercent(value) / 100;
 }
 
 async function createWeeklyTaskBoard(weekStart = currentWeekStartBangkok()) {

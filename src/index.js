@@ -894,7 +894,7 @@ async function handleAssistantChat(body) {
       : {}),
     reply: buildAssistantReply(parsed.reply, actions, appliedActions),
     contextSummary,
-    visualProgressOverview: parsed.visualProgressOverview || null,
+    visualProgressOverview: null,
     actionsRequested: actions,
     actionsApplied: appliedActions,
     tokenUsage: aiTokenUsage(response, "assistant chat"),
@@ -902,7 +902,7 @@ async function handleAssistantChat(body) {
 }
 
 async function createDailyTaskBoard(date = todayBangkok()) {
-  validateRuntimeConfig();
+  validateSheetRuntimeConfig();
 
   const sheets = await getSheetsClient();
   const weekStart = normalizeWeekStart(date);
@@ -918,59 +918,7 @@ async function createDailyTaskBoard(date = todayBangkok()) {
     ));
   }
 
-  const response = await grok.chat.completions.create({
-    model: env.grokModel,
-    temperature: 0.1,
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: [
-          PM_ASSISTANT_SYSTEM_PROMPT,
-          "Create a daily work board for a small game team every morning at 06:00 Bangkok time.",
-          "The timeline sheet header schema is fixed and must be interpreted exactly as: ID, Rock, Priority, Task, Start, End, Blockers, Percent, Response, Sub Response, Status&LateDay.",
-          "Sheet rows are compacted to save tokens. Use each project's timelineSchema, feedbackSchema, targetSchema, and planSchema to interpret short field names. rowNumber is always the Google Sheet row number.",
-          "fullTimeline is encoded as compact arrays. Use timelineColumns as the column order for every fullTimeline row.",
-          "Never ask to edit, rename, insert, delete, or overwrite these headers.",
-          "The backend prefilters fullTimeline to actionable Daily rows: unfinished overdue rows plus rows scheduled today or tomorrow.",
-          "Inspect 100% of the provided filtered fullTimeline rows for both projects before assigning tasks.",
-          "Use rowCounts to understand how many sheet rows were filtered before the AI request.",
-          "scheduleSignals is precomputed by the backend from the full timeline. Overdue, dueSoon, activeWindow, blocked, and lowProgressDeadline rows must be considered high priority evidence.",
-          "First analyze project problems, blockers, stale work, dependencies, owner workload, dates, time pressure, and deadline risk from every available timeline column.",
-          "Use Start as the planned start date, End as the deadline/end date, Percent as completion percentage, Blockers as blocking issues, Priority as urgency, Task as the work item, Rock as milestone/rock grouping, Response/Sub Response as owner or response context, and Status&LateDay as late/status signal.",
-          "Generate daily tasks only after that analysis. Today tasks must be tied to deadline pressure, carry-over risk, blockers, scheduleSignals, or current plan priorities.",
-          "Every overdue row and every lowProgressDeadline row in scheduleSignals must appear in todayTasks or carryOverTasks for its owner unless it is clearly complete.",
-          "Daily Tasks must be a recovery plan for all late work, not only a summary of recent updates.",
-          "When there is more late work than one person can finish in a day, set realistic targetPercent values and explain which late items must be recovered first.",
-          "Return only valid JSON with keys: headline, summary, timelineAnalysis, people.",
-          "timelineAnalysis has projectFindings, deadlineRisks, blockedOrLateWork, workloadNotes, assumptions.",
-          "people is an array for every active team member. Each person has member, role, focus, todayTasks, carryOverTasks, advanceTasks, risks.",
-          "Each task has id, project, rock, title, why, targetPercent, currentPercent, priority, timelineRowNumber.",
-          "The rock field must come from the Rock column for mapped timeline rows. If no Rock is available, use an empty string.",
-          "todayTasks are tasks that should be completed today or should reach a target percent today.",
-          "carryOverTasks are unfinished tasks from previous days.",
-          "advanceTasks are recommended ahead-of-schedule tasks for spare time.",
-          "Use timelineRowNumber when a task maps to a provided timeline row; otherwise use null.",
-          "The why field must briefly mention the timeline evidence, deadline, blocker, or date reason used.",
-          "Percent values must be numbers from 0 to 100. Keep Thai task wording when the sheet context is Thai.",
-        ].join("\n"),
-      },
-      {
-        role: "user",
-        content: JSON.stringify({
-          today: date,
-          morningReviewTime: env.dailyTaskTime,
-          team: teamPromptData(),
-          projects: contexts,
-          contextSummary: summarizeProjectContexts(contexts),
-          scheduleSignals: contexts.map((context) => context.scheduleSignals),
-        }),
-      },
-    ],
-  });
-
-  const parsed = parseJsonObject(response.choices?.[0]?.message?.content);
-  const people = enforceScheduleSignalDailyTasks(normalizeDailyTaskPeople(parsed.people), contexts);
+  const people = buildRuleBasedDailyTaskPeople(contexts, date);
 
   const result = {
     ok: true,
@@ -978,13 +926,13 @@ async function createDailyTaskBoard(date = todayBangkok()) {
     date,
     generatedAt: new Date().toISOString(),
     morningReviewTime: env.dailyTaskTime,
-    headline: String(parsed.headline || "Daily task board").trim(),
-    summary: String(parsed.summary || "").trim(),
-    timelineAnalysis: parsed.timelineAnalysis || null,
+    headline: "Daily task board",
+    summary: buildRuleBasedTaskSummary(contexts, "daily"),
+    timelineAnalysis: buildRuleBasedTimelineAnalysis(contexts),
     people,
     contextSummary: summarizeProjectContexts(contexts),
     scheduleSignals: contexts.map((context) => context.scheduleSignals),
-    tokenUsage: aiTokenUsage(response, "daily task board"),
+    tokenUsage: null,
   };
 
   dailyTaskCache.set(date, result);
@@ -992,7 +940,7 @@ async function createDailyTaskBoard(date = todayBangkok()) {
 }
 
 async function handleDailyTaskSubmission(body) {
-  validateRuntimeConfig();
+  validateSheetRuntimeConfig();
 
   const date = normalizeDate(body.date);
   const developer = normalizePersonName(body.developer || body.member || body.name || "Unknown");
@@ -1007,66 +955,20 @@ async function handleDailyTaskSubmission(body) {
 
   const sheets = await getSheetsClient();
   const directProgressAction = await applySubmittedProgressPercents(sheets, progressItems);
-  const weekStart = normalizeWeekStart(date);
-  const contexts = [];
-
-  for (const project of Object.values(PROJECTS)) {
-    contexts.push(await buildProjectManagementContext(sheets, project, weekStart));
-  }
-
-  const response = await grok.chat.completions.create({
-    model: env.grokModel,
-    temperature: 0.15,
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: [
-          PM_ASSISTANT_SYSTEM_PROMPT,
-          "Convert a daily task submission into focused Google Sheet updates.",
-          "Return only valid JSON with keys: reply, actions, visualProgressOverview.",
-          "Supported actions: patch_sheet_cells and save_update.",
-          "progressItems may include member and rock when the submission comes from selected Daily or Weekly task sliders. Treat member as the owner/person who updated that task. Use rock as supporting context only; do not overwrite Rock unless explicitly requested.",
-          "Prefer patch_sheet_cells when the submitted item has a valid project and timelineRowNumber.",
-          "For patch_sheet_cells use project, sheet='timeline', updates with rowNumber, field, value.",
-          "Timeline headers are fixed: ID, Rock, Priority, Task, Start, End, Blockers, Percent, Response, Sub Response, Status&LateDay.",
-          "Never edit row 1 or any timeline header. Useful editable timeline fields are Blockers, Percent, Response, Sub Response, and Status&LateDay.",
-          "Use save_update when progress cannot be mapped to an existing row.",
-          "Keep updates concise. Preserve Thai wording from the submission when writing to sheets.",
-          "Sheet rows are compacted to save tokens. Use each project's timelineSchema, feedbackSchema, targetSchema, and planSchema to interpret short field names. rowNumber is always the Google Sheet row number.",
-        ].join("\n"),
-      },
-      {
-        role: "user",
-        content: JSON.stringify({
-          date,
-          developer,
-          note,
-          progressItems,
-          team: teamPromptData(),
-          projects: contexts,
-          contextSummary: summarizeProjectContexts(contexts),
-        }),
-      },
-    ],
-  });
-
-  const parsed = parseJsonObject(response.choices?.[0]?.message?.content);
-  const actions = Array.isArray(parsed.actions) ? parsed.actions : [];
-  const appliedActions = [
-    directProgressAction,
-    ...await executeAssistantActions(actions, { confirmSend: false }),
-  ].filter(Boolean);
+  const appliedActions = [directProgressAction].filter(Boolean);
 
   return {
     ok: true,
     date,
     developer,
-    reply: buildAssistantReply(parsed.reply, actions, appliedActions),
-    visualProgressOverview: parsed.visualProgressOverview || null,
-    actionsRequested: actions,
+    reply: appliedActions.length
+      ? `Updated ${directProgressAction.editedCells} timeline progress cell(s) directly from the selected task board.`
+      : "No timeline rows were updated. Select tasks with row numbers before submitting.",
+    visualProgressOverview: null,
+    note,
+    actionsRequested: [],
     actionsApplied: appliedActions,
-    tokenUsage: aiTokenUsage(response, "daily task submission"),
+    tokenUsage: null,
   };
 }
 
@@ -1119,7 +1021,7 @@ async function applySubmittedProgressPercents(sheets, progressItems) {
 }
 
 async function createWeeklyTaskBoard(weekStart = currentWeekStartBangkok()) {
-  validateRuntimeConfig();
+  validateSheetRuntimeConfig();
 
   const normalizedWeekStart = normalizeWeekStart(weekStart);
   const sheets = await getSheetsClient();
@@ -1135,49 +1037,7 @@ async function createWeeklyTaskBoard(weekStart = currentWeekStartBangkok()) {
     ));
   }
 
-  const response = await grok.chat.completions.create({
-    model: env.grokModel,
-    temperature: 0.1,
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: [
-          PM_ASSISTANT_SYSTEM_PROMPT,
-          "Create a weekly work board for the whole game team.",
-          "The timeline sheet header schema is fixed and must be interpreted exactly as: ID, Rock, Priority, Task, Start, End, Blockers, Percent, Response, Sub Response, Status&LateDay.",
-          "Sheet rows are compacted to save tokens. Use each project's timelineSchema, feedbackSchema, targetSchema, and planSchema to interpret short field names. rowNumber is always the Google Sheet row number.",
-          "fullTimeline is encoded as compact arrays. Use timelineColumns as the column order for every fullTimeline row.",
-          "Never ask to edit, rename, insert, delete, or overwrite these headers.",
-          "The backend prefilters fullTimeline to actionable Weekly rows: unfinished overdue rows plus rows scheduled during the selected week.",
-          "Inspect 100% of the provided filtered fullTimeline rows for both projects before assigning weekly work.",
-          "Weekly Tasks must answer: what should be finished by the end of this week, what late work must be recovered, and what can be advanced if there is spare capacity.",
-          "Every overdue row and every lowProgressDeadline row in scheduleSignals must appear in recoveryTasks or mustFinishThisWeek for its owner unless it is clearly complete.",
-          "Use Start/End to decide what belongs in this week. Use Percent and Status&LateDay to decide whether it is late, behind, or on track.",
-          "Plan realistically across the whole week. If a task cannot reach 100% this week, set targetPercent to the highest realistic weekly target and explain why.",
-          "Return only valid JSON with keys: headline, summary, people, weeklyRisks, finishByWeekEnd.",
-          "people is an array for every active team member. Each person has member, role, focus, mustFinishThisWeek, recoveryTasks, advanceTasks, risks.",
-          "Each task has id, project, rock, title, why, targetPercent, currentPercent, priority, timelineRowNumber.",
-          "The rock field must come from the Rock column for mapped timeline rows. If no Rock is available, use an empty string.",
-          "Keep Thai wording when the sheet context is Thai.",
-        ].join("\n"),
-      },
-      {
-        role: "user",
-        content: JSON.stringify({
-          weekStart: normalizedWeekStart,
-          weekEnd: weekEndFromStart(normalizedWeekStart),
-          team: teamPromptData(),
-          projects: contexts,
-          contextSummary: summarizeProjectContexts(contexts),
-          scheduleSignals: contexts.map((context) => context.scheduleSignals),
-        }),
-      },
-    ],
-  });
-
-  const parsed = parseJsonObject(response.choices?.[0]?.message?.content);
-  const people = enforceScheduleSignalWeeklyTasks(normalizeWeeklyTaskPeople(parsed.people), contexts);
+  const people = buildRuleBasedWeeklyTaskPeople(contexts, normalizedWeekStart);
 
   const result = {
     ok: true,
@@ -1185,14 +1045,14 @@ async function createWeeklyTaskBoard(weekStart = currentWeekStartBangkok()) {
     weekStart: normalizedWeekStart,
     weekEnd: weekEndFromStart(normalizedWeekStart),
     generatedAt: new Date().toISOString(),
-    headline: String(parsed.headline || "Weekly task board").trim(),
-    summary: String(parsed.summary || "").trim(),
+    headline: "Weekly task board",
+    summary: buildRuleBasedTaskSummary(contexts, "weekly"),
     people,
-    weeklyRisks: asArray(parsed.weeklyRisks),
-    finishByWeekEnd: asArray(parsed.finishByWeekEnd),
+    weeklyRisks: buildRuleBasedRiskList(contexts),
+    finishByWeekEnd: buildRuleBasedFinishList(contexts),
     contextSummary: summarizeProjectContexts(contexts),
     scheduleSignals: contexts.map((context) => context.scheduleSignals),
-    tokenUsage: aiTokenUsage(response, "weekly task board"),
+    tokenUsage: null,
   };
 
   weeklyTaskCache.set(normalizedWeekStart, result);
@@ -2713,13 +2573,15 @@ function getTimelineRowScheduleInfo(row) {
     .flatMap((value) => [...possibleSheetDates(value)])
     .map(dateToBangkokTime)
     .filter((time) => Number.isFinite(time));
-  const percent = clampPercent(row.percent ?? fields.Percent);
+  const percent = clampPercent(row.percent ?? row.pct ?? fields.Percent);
   const statusText = [
     row.statusLateDay,
+    row.status,
     fields["Status&LateDay"],
     fields.Status,
     fields.Percent,
     row.percent,
+    row.pct,
   ].map(cleanSheetCellValue).join(" ").toLowerCase();
 
   return {
@@ -3494,16 +3356,31 @@ function normalizePrivateKey(value) {
 function validateRuntimeConfig() {
   const missing = [];
   if (!grok) missing.push("GROK_API_KEY");
-  if (!PROJECTS.dynozoic.spreadsheetId) missing.push("DYNOZOIC_SHEET_ID");
-  if (!PROJECTS.eaa.spreadsheetId) missing.push("EAA_SHEET_ID");
-  if (!env.googleServiceAccountEmail) missing.push("GOOGLE_SERVICE_ACCOUNT_EMAIL");
-  if (!env.googlePrivateKey) missing.push("GOOGLE_PRIVATE_KEY");
+  pushMissingSheetRuntimeConfig(missing);
 
   if (missing.length > 0) {
     const error = new Error(`Missing required env: ${missing.join(", ")}`);
     error.statusCode = 500;
     throw error;
   }
+}
+
+function validateSheetRuntimeConfig() {
+  const missing = [];
+  pushMissingSheetRuntimeConfig(missing);
+
+  if (missing.length > 0) {
+    const error = new Error(`Missing required env: ${missing.join(", ")}`);
+    error.statusCode = 500;
+    throw error;
+  }
+}
+
+function pushMissingSheetRuntimeConfig(missing) {
+  if (!PROJECTS.dynozoic.spreadsheetId) missing.push("DYNOZOIC_SHEET_ID");
+  if (!PROJECTS.eaa.spreadsheetId) missing.push("EAA_SHEET_ID");
+  if (!env.googleServiceAccountEmail) missing.push("GOOGLE_SERVICE_ACCOUNT_EMAIL");
+  if (!env.googlePrivateKey) missing.push("GOOGLE_PRIVATE_KEY");
 }
 
 function resolveProject(value) {
@@ -3848,6 +3725,165 @@ function normalizePlanTask(task) {
     dependencies: String(task.dependencies || task.dependency || "").trim(),
     status: String(task.status || "Planned").trim(),
   };
+}
+
+function buildRuleBasedDailyTaskPeople(contexts, date) {
+  const people = createEmptyDailyTaskPeople();
+
+  for (const context of contexts) {
+    for (const row of context.fullTimeline || []) {
+      const task = timelineContextRowToTask(context, row, date, "daily");
+      if (!task) continue;
+
+      const person = people.get(task.owner) || people.get("\u0e17\u0e35\u0e19");
+      const bucket = task.isOverdue ? "carryOverTasks" : "todayTasks";
+      person[bucket].push(stripTaskOwner(task));
+    }
+  }
+
+  return [...people.values()];
+}
+
+function buildRuleBasedWeeklyTaskPeople(contexts, weekStart) {
+  const people = createEmptyWeeklyTaskPeople();
+
+  for (const context of contexts) {
+    for (const row of context.fullTimeline || []) {
+      const task = timelineContextRowToTask(context, row, weekStart, "weekly");
+      if (!task) continue;
+
+      const person = people.get(task.owner) || people.get("\u0e17\u0e35\u0e19");
+      const bucket = task.isOverdue ? "recoveryTasks" : "mustFinishThisWeek";
+      person[bucket].push(stripTaskOwner(task));
+    }
+  }
+
+  return [...people.values()];
+}
+
+function createEmptyDailyTaskPeople() {
+  return new Map(ACTIVE_TEAM_MEMBERS.map((member) => [member.name, {
+    member: member.name,
+    role: member.role,
+    focus: "Sheet-filtered timeline work",
+    todayTasks: [],
+    carryOverTasks: [],
+    advanceTasks: [],
+    risks: [],
+  }]));
+}
+
+function createEmptyWeeklyTaskPeople() {
+  return new Map(ACTIVE_TEAM_MEMBERS.map((member) => [member.name, {
+    member: member.name,
+    role: member.role,
+    focus: "Sheet-filtered weekly timeline work",
+    mustFinishThisWeek: [],
+    recoveryTasks: [],
+    advanceTasks: [],
+    risks: [],
+  }]));
+}
+
+function timelineContextRowToTask(context, sourceRow, reviewDate, scope) {
+  const row = compactTimelineArrayToObject(sourceRow);
+  const title = cleanSheetCellValue(row.task);
+  if (!title) return null;
+
+  const schedule = getTimelineRowScheduleInfo(row);
+  const owner = resolveTaskOwner(row);
+  const currentPercent = clampPercent(row.pct);
+  const isOverdue = schedule.times.some((time) => time < dateToBangkokTime(reviewDate));
+  const dateReason = formatTaskDateReason(row, isOverdue, scope);
+
+  return {
+    owner,
+    isOverdue,
+    id: `${scope}-${context.projectKey}-${row.rowNumber}`,
+    project: context.projectKey,
+    rock: cleanSheetCellValue(row.rock),
+    title,
+    why: [
+      isOverdue ? `Overdue row ${row.rowNumber}` : `Scheduled row ${row.rowNumber}`,
+      dateReason,
+      row.blk ? `Blockers: ${row.blk}` : "",
+      row.status ? `Status: ${row.status}` : "",
+    ].filter(Boolean).join(" | "),
+    targetPercent: isOverdue ? 100 : Math.max(currentPercent, Math.min(100, currentPercent + 20)),
+    currentPercent,
+    priority: cleanSheetCellValue(row.pri) || (isOverdue ? "High" : "Medium"),
+    timelineRowNumber: normalizeOptionalRowNumber(row.rowNumber),
+  };
+}
+
+function stripTaskOwner(task) {
+  const { owner: _owner, isOverdue: _isOverdue, ...cleanTask } = task;
+  return cleanTask;
+}
+
+function resolveTaskOwner(row) {
+  const candidates = [
+    row.resp,
+    row.sub,
+    row.status,
+    row.task,
+  ].map(cleanSheetCellValue).filter(Boolean);
+
+  for (const candidate of candidates) {
+    const name = normalizePersonName(candidate);
+    if (ACTIVE_TEAM_MEMBERS.some((member) => member.name === name)) return name;
+  }
+
+  return "\u0e17\u0e35\u0e19";
+}
+
+function formatTaskDateReason(row, isOverdue, scope) {
+  const dates = [
+    ...possibleSheetDates(row.start),
+    ...possibleSheetDates(row.end),
+  ];
+  const uniqueDates = [...new Set(dates)];
+  if (uniqueDates.length === 0) return "";
+  const label = isOverdue ? "Past date" : scope === "weekly" ? "This week" : "Today/tomorrow";
+  return `${label}: ${uniqueDates.join(", ")}`;
+}
+
+function buildRuleBasedTaskSummary(contexts, scope) {
+  const total = contexts.reduce((sum, context) => sum + (context.fullTimeline?.length || 0), 0);
+  const filtered = contexts.reduce((sum, context) => sum + (context.rowCounts.timelineFilteredOut || 0), 0);
+  return `${scope === "weekly" ? "Weekly" : "Daily"} board generated directly from Google Sheets without AI. Sent rows: ${total}. Filtered out: ${filtered}.`;
+}
+
+function buildRuleBasedTimelineAnalysis(contexts) {
+  return {
+    projectFindings: contexts.map((context) => `${context.project}: ${context.fullTimeline?.length || 0} actionable rows`),
+    deadlineRisks: buildRuleBasedRiskList(contexts),
+    blockedOrLateWork: contexts.flatMap((context) => [
+      ...context.scheduleSignals.overdue,
+      ...context.scheduleSignals.blocked,
+    ]).slice(0, 20),
+    workloadNotes: [],
+    assumptions: ["Generated from Start, End, Percent, owner, blocker, and status columns without AI."],
+  };
+}
+
+function buildRuleBasedRiskList(contexts) {
+  return contexts
+    .flatMap((context) => [
+      ...context.scheduleSignals.overdue.map((item) => `${context.project}: overdue row ${item.rowNumber} - ${item.title}`),
+      ...context.scheduleSignals.lowProgressDeadline.map((item) => `${context.project}: low progress row ${item.rowNumber} - ${item.title}`),
+      ...context.scheduleSignals.blocked.map((item) => `${context.project}: blocked row ${item.rowNumber} - ${item.title}`),
+    ])
+    .slice(0, 20);
+}
+
+function buildRuleBasedFinishList(contexts) {
+  return contexts
+    .flatMap((context) => (context.fullTimeline || []).map((row) => {
+      const item = compactTimelineArrayToObject(row);
+      return `${context.project}: row ${item.rowNumber} - ${item.task}`;
+    }))
+    .slice(0, 20);
 }
 
 function normalizeDailyTaskPeople(people) {

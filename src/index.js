@@ -176,6 +176,7 @@ const DATABASE_HEADERS = [
   "Payload",
   "Updated At",
 ];
+const DATABASE_PAYLOAD_CHUNK_SIZE = 45000;
 
 const TIMELINE_EDIT_FIELDS = {
   id: { header: "ID", column: "A" },
@@ -2469,32 +2470,40 @@ async function saveGeneratedResultToDatabase(type, key, payload) {
   const rows = await readDatabaseRows(sheets, project);
   const normalizedType = cleanSheetCellValue(type);
   const normalizedKey = cleanSheetCellValue(key);
-  const rowIndex = rows.findIndex((row, index) => (
-    index > 0
-    && cleanSheetCellValue(row[0]) === normalizedType
-    && cleanSheetCellValue(row[1]) === normalizedKey
-  ));
-  const values = [[
+  const existingRowNumbers = rows
+    .map((row, index) => ({ row, rowNumber: index + 1 }))
+    .filter((item) => (
+      item.rowNumber > 1
+      && cleanSheetCellValue(item.row[0]) === normalizedType
+      && cleanSheetCellValue(item.row[1]) === normalizedKey
+    ))
+    .map((item) => item.rowNumber);
+
+  if (existingRowNumbers.length > 0) {
+    await sheets.spreadsheets.values.batchClear({
+      spreadsheetId: project.spreadsheetId,
+      requestBody: {
+        ranges: existingRowNumbers.map((rowNumber) => `${quoteSheet(DATABASE_SHEET_NAME)}!A${rowNumber}:G${rowNumber}`),
+      },
+    });
+  }
+
+  const payloadText = JSON.stringify(payload);
+  const chunks = chunkText(payloadText, DATABASE_PAYLOAD_CHUNK_SIZE);
+  const updatedAt = new Date().toISOString();
+  const values = chunks.map((chunk, index) => [
     normalizedType,
     normalizedKey,
     payload.date || payload.weekStart || normalizedKey,
-    JSON.stringify(payload),
-    new Date().toISOString(),
-  ]];
-
-  if (rowIndex >= 0) {
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: project.spreadsheetId,
-      range: `${quoteSheet(DATABASE_SHEET_NAME)}!A${rowIndex + 1}:E${rowIndex + 1}`,
-      valueInputOption: "RAW",
-      requestBody: { values },
-    });
-    return;
-  }
+    chunk,
+    updatedAt,
+    index + 1,
+    chunks.length,
+  ]);
 
   await sheets.spreadsheets.values.append({
     spreadsheetId: project.spreadsheetId,
-    range: `${quoteSheet(DATABASE_SHEET_NAME)}!A:E`,
+    range: `${quoteSheet(DATABASE_SHEET_NAME)}!A:G`,
     valueInputOption: "RAW",
     insertDataOption: "INSERT_ROWS",
     requestBody: { values },
@@ -2510,12 +2519,30 @@ async function loadGeneratedResultFromDatabase(type, key) {
     const rows = await readDatabaseRows(sheets, project);
     const normalizedType = cleanSheetCellValue(type);
     const normalizedKey = cleanSheetCellValue(key);
-    const found = rows.slice(1).find((row) => (
+    const foundRows = rows.slice(1).filter((row) => (
       cleanSheetCellValue(row[0]) === normalizedType
       && cleanSheetCellValue(row[1]) === normalizedKey
     ));
-    if (!found?.[3]) return null;
-    return JSON.parse(found[3]);
+    if (foundRows.length === 0) return null;
+
+    const chunkRows = foundRows.filter((row) => Number(row[5]) > 0);
+    if (chunkRows.length === 0) {
+      const found = foundRows[foundRows.length - 1];
+      return found?.[3] ? JSON.parse(found[3]) : null;
+    }
+
+    const latestUpdatedAt = chunkRows
+      .map((row) => cleanSheetCellValue(row[4]))
+      .filter(Boolean)
+      .sort()
+      .at(-1);
+    const chunks = chunkRows
+      .filter((row) => cleanSheetCellValue(row[4]) === latestUpdatedAt)
+      .sort((a, b) => Number(a[5]) - Number(b[5]));
+    const expectedTotal = Number(chunks[0]?.[6] || chunks.length);
+    if (chunks.length < expectedTotal) return null;
+
+    return JSON.parse(chunks.map((row) => row[3] || "").join(""));
   } catch (error) {
     console.error("Database load failed:", error.message);
     return null;
@@ -2525,9 +2552,18 @@ async function loadGeneratedResultFromDatabase(type, key) {
 async function readDatabaseRows(sheets, project) {
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: project.spreadsheetId,
-    range: `${quoteSheet(DATABASE_SHEET_NAME)}!A:E`,
+    range: `${quoteSheet(DATABASE_SHEET_NAME)}!A:G`,
   });
   return response.data.values || [];
+}
+
+function chunkText(value, size) {
+  const text = String(value || "");
+  const chunks = [];
+  for (let index = 0; index < text.length; index += size) {
+    chunks.push(text.slice(index, index + size));
+  }
+  return chunks.length ? chunks : [""];
 }
 
 function getDatabaseProject() {

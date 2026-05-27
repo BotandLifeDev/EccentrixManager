@@ -204,7 +204,10 @@ async function submitChat(form) {
   const actionsText = result.actionsApplied?.length
     ? `\n\nActions applied:\n${result.actionsApplied.map(formatAppliedAction).join("\n")}`
     : "";
-  const reply = `${result.reply || "Done."}${contextText}${overviewText}${actionsText}`;
+  const tokenText = result.tokenUsage
+    ? `\n\nToken Usage:\n${formatTokenUsage(result.tokenUsage)}`
+    : "";
+  const reply = `${result.reply || "Done."}${contextText}${overviewText}${actionsText}${tokenText}`;
 
   addChatMessage("assistant", reply);
   state.chatHistory.push({ role: "user", content: message });
@@ -903,6 +906,24 @@ function formatContextSummary(summary) {
     `  plan total: ${item.weeklyPlanTotalCount}`,
     `  plan this week: ${item.currentPlanCount}`,
   ].join("\n")).join("\n");
+}
+
+function formatTokenUsage(usage) {
+  const contextWindow = usage.contextWindowTokens
+    ? usage.contextWindowTokens.toLocaleString()
+    : "unknown";
+  const remaining = usage.contextWindowTokens && usage.promptTokens
+    ? Math.max(0, usage.contextWindowTokens - usage.promptTokens).toLocaleString()
+    : "unknown";
+
+  return [
+    `model: ${usage.model || "unknown"}`,
+    `prompt/input: ${Number(usage.promptTokens || 0).toLocaleString()}`,
+    `completion/output: ${Number(usage.completionTokens || 0).toLocaleString()}`,
+    `total used: ${Number(usage.totalTokens || 0).toLocaleString()}`,
+    `context window: ${contextWindow}`,
+    `estimated input room left: ${remaining}`,
+  ].join("\n");
 }
 
 function formatAppliedAction(item) {

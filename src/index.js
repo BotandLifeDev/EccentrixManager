@@ -58,6 +58,57 @@ const TIMELINE_HEADERS = [
   "Status&LateDay",
 ];
 
+const TIMELINE_COMPACT_SCHEMA = {
+  rowNumber: "Google Sheet row number",
+  id: "ID",
+  rock: "Rock",
+  pri: "Priority",
+  task: "Task",
+  start: "Start",
+  end: "End",
+  blk: "Blockers",
+  pct: "Percent",
+  resp: "Response",
+  sub: "Sub Response",
+  status: "Status&LateDay",
+};
+
+const FEEDBACK_COMPACT_SCHEMA = {
+  rowNumber: "Google Sheet row number",
+  date: "Date",
+  dev: "Developer",
+  feedback: "Feedback",
+  summary: "Summary",
+  cat: "Category",
+  action: "Suggested Action",
+  status: "Status",
+};
+
+const TARGET_COMPACT_SCHEMA = {
+  rowNumber: "Google Sheet row number",
+  week: "Week Start",
+  project: "Project",
+  owner: "Owner",
+  raw: "Raw Target",
+  refined: "AI Refined Target",
+  success: "Success Criteria",
+  risks: "Risks",
+  source: "Source",
+};
+
+const PLAN_COMPACT_SCHEMA = {
+  rowNumber: "Google Sheet row number",
+  week: "Week Start",
+  project: "Project",
+  assignee: "Assignee",
+  role: "Role",
+  task: "Task",
+  pri: "Priority",
+  success: "Success Criteria",
+  deps: "Dependencies",
+  status: "Status",
+};
+
 const FEEDBACK_HEADERS = [
   "Date",
   "Developer",
@@ -196,6 +247,7 @@ const env = {
   port: Number(process.env.PORT || 3000),
   grokApiKey: process.env.GROK_API_KEY,
   grokModel: process.env.GROK_MODEL || "grok-3-latest",
+  grokContextWindow: Number(process.env.GROK_CONTEXT_WINDOW || process.env.AI_CONTEXT_WINDOW || 0),
   googleServiceAccountEmail: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
   googlePrivateKey: normalizePrivateKey(process.env.GOOGLE_PRIVATE_KEY),
   discordToken: process.env.DISCORD_TOKEN,
@@ -356,11 +408,15 @@ app.post("/daily-summary", async (req, res) => {
     const summaries = await createAllDailyReports(date);
     const report = formatDailyReportBatch(summaries);
     if (!isConfirmedSend(req)) {
-      res.json({ ...createDiscordPreviewResponse(report, "Daily Summary"), summaries });
+      res.json({
+        ...createDiscordPreviewResponse(report, "Daily Summary"),
+        summaries,
+        tokenUsage: summaries.tokenUsage || null,
+      });
       return;
     }
     await sendDiscordReport(report);
-    res.json({ ok: true, sent: true, summaries, report });
+    res.json({ ok: true, sent: true, summaries, report, tokenUsage: summaries.tokenUsage || null });
   } catch (error) {
     sendHttpError(res, error);
   }
@@ -601,6 +657,7 @@ async function handleDeveloperUpdate(update) {
     update,
     project,
     analysis,
+    tokenUsage: analysis.tokenUsage,
   };
 }
 
@@ -653,6 +710,7 @@ async function handleAssistantTimelineUpdate(update) {
       analysis,
       decision,
       patchResult,
+      tokenUsage: aggregateTokenUsage([analysis.tokenUsage, decision.tokenUsage], "assistant timeline update"),
     };
   }
 
@@ -665,6 +723,7 @@ async function handleAssistantTimelineUpdate(update) {
     update,
     analysis,
     decision,
+    tokenUsage: aggregateTokenUsage([analysis.tokenUsage, decision.tokenUsage], "assistant timeline update"),
   };
 }
 
@@ -684,6 +743,7 @@ async function handleFeedback(feedback) {
     project,
     feedback,
     analysis,
+    tokenUsage: analysis.tokenUsage,
   };
 }
 
@@ -728,6 +788,7 @@ async function handleWeeklyTarget(target) {
     target,
     aiTarget,
     plan,
+    tokenUsage: aggregateTokenUsage([aiTarget.tokenUsage, plan.tokenUsage], "weekly target"),
   };
 }
 
@@ -778,6 +839,7 @@ async function handleAssistantChat(body) {
           "Never claim Google Sheets were edited unless you include the exact edit action in actions. If you only analyzed data, say that no sheet edit was performed.",
           "If a required field is missing, do not create the action; ask a concise follow-up in reply.",
           "When answering timeline questions, rely on the provided projects context. If contextSummary shows zero recentTimeline rows, clearly say the timeline was not loaded and suggest checking sheet tab names and sheet IDs.",
+          "Sheet rows are compacted to save tokens. Use each project's timelineSchema, feedbackSchema, targetSchema, and planSchema to interpret short field names. rowNumber is always the Google Sheet row number.",
           "The user may write in Thai, English, or mixed language. Understand Thai normally, but reply and visualProgressOverview must be English only.",
           "Do not translate action values that will be written to Google Sheets; preserve the source language for saved timeline, feedback, target, and plan content.",
         ].join("\n"),
@@ -814,6 +876,7 @@ async function handleAssistantChat(body) {
     visualProgressOverview: parsed.visualProgressOverview || null,
     actionsRequested: actions,
     actionsApplied: appliedActions,
+    tokenUsage: aiTokenUsage(response, "assistant chat"),
   };
 }
 
@@ -839,6 +902,7 @@ async function createDailyTaskBoard(date = todayBangkok()) {
           PM_ASSISTANT_SYSTEM_PROMPT,
           "Create a daily work board for a small game team every morning at 06:00 Bangkok time.",
           "The timeline sheet header schema is fixed and must be interpreted exactly as: ID, Rock, Priority, Task, Start, End, Blockers, Percent, Response, Sub Response, Status&LateDay.",
+          "Sheet rows are compacted to save tokens. Use each project's timelineSchema, feedbackSchema, targetSchema, and planSchema to interpret short field names. rowNumber is always the Google Sheet row number.",
           "Never ask to edit, rename, insert, delete, or overwrite these headers.",
           "You must inspect 100% of the provided fullTimeline rows for both projects before assigning tasks.",
           "Do not rely only on recent rows. Use rowCounts to confirm timelineSentToAi equals meaningfulTimeline for each project.",
@@ -891,6 +955,7 @@ async function createDailyTaskBoard(date = todayBangkok()) {
     people,
     contextSummary: summarizeProjectContexts(contexts),
     scheduleSignals: contexts.map((context) => context.scheduleSignals),
+    tokenUsage: aiTokenUsage(response, "daily task board"),
   };
 
   dailyTaskCache.set(date, result);
@@ -939,6 +1004,7 @@ async function handleDailyTaskSubmission(body) {
           "Never edit row 1 or any timeline header. Useful editable timeline fields are Blockers, Percent, Response, Sub Response, and Status&LateDay.",
           "Use save_update when progress cannot be mapped to an existing row.",
           "Keep updates concise. Preserve Thai wording from the submission when writing to sheets.",
+          "Sheet rows are compacted to save tokens. Use each project's timelineSchema, feedbackSchema, targetSchema, and planSchema to interpret short field names. rowNumber is always the Google Sheet row number.",
         ].join("\n"),
       },
       {
@@ -971,6 +1037,7 @@ async function handleDailyTaskSubmission(body) {
     visualProgressOverview: parsed.visualProgressOverview || null,
     actionsRequested: actions,
     actionsApplied: appliedActions,
+    tokenUsage: aiTokenUsage(response, "daily task submission"),
   };
 }
 
@@ -1044,6 +1111,7 @@ async function createWeeklyTaskBoard(weekStart = currentWeekStartBangkok()) {
           PM_ASSISTANT_SYSTEM_PROMPT,
           "Create a weekly work board for the whole game team.",
           "The timeline sheet header schema is fixed and must be interpreted exactly as: ID, Rock, Priority, Task, Start, End, Blockers, Percent, Response, Sub Response, Status&LateDay.",
+          "Sheet rows are compacted to save tokens. Use each project's timelineSchema, feedbackSchema, targetSchema, and planSchema to interpret short field names. rowNumber is always the Google Sheet row number.",
           "Never ask to edit, rename, insert, delete, or overwrite these headers.",
           "You must inspect 100% of the provided fullTimeline rows for both projects before assigning weekly work.",
           "Weekly Tasks must answer: what should be finished by the end of this week, what late work must be recovered, and what can be advanced if there is spare capacity.",
@@ -1087,6 +1155,7 @@ async function createWeeklyTaskBoard(weekStart = currentWeekStartBangkok()) {
     finishByWeekEnd: asArray(parsed.finishByWeekEnd),
     contextSummary: summarizeProjectContexts(contexts),
     scheduleSignals: contexts.map((context) => context.scheduleSignals),
+    tokenUsage: aiTokenUsage(response, "weekly task board"),
   };
 
   weeklyTaskCache.set(normalizedWeekStart, result);
@@ -1115,6 +1184,7 @@ async function createMilestoneReview(date = todayBangkok()) {
           PM_ASSISTANT_SYSTEM_PROMPT,
           "Create a milestone review for both game projects at the same 06:00 Bangkok morning review time as Daily Tasks.",
           "The timeline sheet header schema is fixed and must be interpreted exactly as: ID, Rock, Priority, Task, Start, End, Blockers, Percent, Response, Sub Response, Status&LateDay.",
+          "Sheet rows are compacted to save tokens. Use each project's timelineSchema, feedbackSchema, targetSchema, and planSchema to interpret short field names. rowNumber is always the Google Sheet row number.",
           "Never ask to edit, rename, insert, delete, or overwrite these headers.",
           "You must inspect 100% of each project's provided fullTimeline rows before estimating milestone progress.",
           "scheduleSignals is precomputed by the backend from the full timeline. Use it to identify late, due soon, blocked, low progress, and currently scheduled milestone work.",
@@ -1161,6 +1231,7 @@ async function createMilestoneReview(date = todayBangkok()) {
     recommendations: asArray(parsed.recommendations),
     contextSummary: summarizeProjectContexts(contexts),
     scheduleSignals: contexts.map((context) => context.scheduleSignals),
+    tokenUsage: aiTokenUsage(response, "milestone review"),
   };
 
   milestoneReviewCache.set(date, result);
@@ -1575,6 +1646,44 @@ function buildAssistantReply(reply, actions, appliedActions) {
   return text || "Done.";
 }
 
+function aiTokenUsage(response, label = "ai") {
+  const usage = response?.usage || {};
+  const promptTokens = Number(usage.prompt_tokens ?? usage.input_tokens ?? 0);
+  const completionTokens = Number(usage.completion_tokens ?? usage.output_tokens ?? 0);
+  const totalTokens = Number(usage.total_tokens ?? (promptTokens + completionTokens));
+
+  return {
+    label,
+    model: response?.model || env.grokModel,
+    promptTokens,
+    completionTokens,
+    totalTokens,
+    contextWindowTokens: env.grokContextWindow || null,
+    contextWindowSource: env.grokContextWindow ? "env" : "unknown",
+  };
+}
+
+function aggregateTokenUsage(usages, label = "total") {
+  const items = (Array.isArray(usages) ? usages : [])
+    .flatMap((item) => item?.calls ? item.calls : item)
+    .filter(Boolean);
+
+  const totals = items.reduce((sum, item) => ({
+    promptTokens: sum.promptTokens + Number(item.promptTokens || 0),
+    completionTokens: sum.completionTokens + Number(item.completionTokens || 0),
+    totalTokens: sum.totalTokens + Number(item.totalTokens || 0),
+  }), { promptTokens: 0, completionTokens: 0, totalTokens: 0 });
+
+  return {
+    label,
+    model: env.grokModel,
+    ...totals,
+    contextWindowTokens: env.grokContextWindow || null,
+    contextWindowSource: env.grokContextWindow ? "env" : "unknown",
+    calls: items,
+  };
+}
+
 function summarizeProjectContexts(contexts) {
   return contexts.map((context) => ({
     project: context.project,
@@ -1601,11 +1710,12 @@ function summarizeProjectContexts(contexts) {
     currentPlanCount: context.currentPlan.length,
     latestTimeline: context.recentTimeline.slice(-3).map((row) => ({
       rowNumber: row.rowNumber,
-      date: row.date,
-      developer: row.developer,
-      summary: row.summary || row.rawUpdate,
-      blockers: row.blockers,
-      nextSteps: row.nextSteps,
+      start: row.start,
+      owner: row.resp,
+      task: row.task,
+      percent: row.pct,
+      blockers: row.blk,
+      status: row.status,
     })),
   }));
 }
@@ -1647,6 +1757,7 @@ async function analyzeWithGrok(update) {
     nextSteps: asArray(parsed.nextSteps),
     tags: asArray(parsed.tags),
     confidence: Number(parsed.confidence || 0),
+    tokenUsage: aiTokenUsage(response, "analyze update"),
   };
 }
 
@@ -1672,6 +1783,7 @@ async function decideTimelineUpdateTargetWithGrok(project, update, analysis, exi
           "updates is an array of { rowNumber, field, value } using rowNumber from existingRows.",
           "Allowed timeline fields: ID, Rock, Priority, Task, Start, End, Blockers, Percent, Response, Sub Response, Status&LateDay.",
           "Never edit row 1 or any header. Keep Thai when the input is Thai.",
+          "existingRows are compacted to save tokens: rowNumber is the Google Sheet row, and the other short keys map to timeline headers in timelineSchema.",
         ].join("\n"),
       },
       {
@@ -1690,7 +1802,8 @@ async function decideTimelineUpdateTargetWithGrok(project, update, analysis, exi
             tags: analysis.tags,
             confidence: analysis.confidence,
           },
-          existingRows,
+          timelineSchema: TIMELINE_COMPACT_SCHEMA,
+          existingRows: existingRows.map(compactTimelineRow),
         }),
       },
     ],
@@ -1701,6 +1814,7 @@ async function decideTimelineUpdateTargetWithGrok(project, update, analysis, exi
     mode: String(parsed.mode || "").trim().toLowerCase() === "patch" ? "patch" : "append",
     reason: String(parsed.reason || "").trim(),
     updates: Array.isArray(parsed.updates) ? parsed.updates : [],
+    tokenUsage: aiTokenUsage(response, "decide timeline target"),
   };
 }
 
@@ -1732,6 +1846,7 @@ async function analyzeFeedbackWithGrok(project, feedback) {
     summary: String(parsed.summary || feedback.text).trim(),
     category: String(parsed.category || "General").trim(),
     suggestedAction: String(parsed.suggestedAction || "").trim(),
+    tokenUsage: aiTokenUsage(response, "analyze feedback"),
   };
 }
 
@@ -1767,6 +1882,7 @@ async function refineWeeklyTargetWithGrok(project, target, context) {
     successCriteria: asArray(parsed.successCriteria),
     risks: asArray(parsed.risks),
     confidence: Number(parsed.confidence || 0),
+    tokenUsage: aiTokenUsage(response, "refine weekly target"),
   };
 }
 
@@ -1799,6 +1915,7 @@ async function createWeeklyPlanWithGrok(project, weekStart, target, context) {
   const rawTasks = Array.isArray(parsed.tasks) ? parsed.tasks : [];
   return {
     tasks: rawTasks.map(normalizePlanTask).filter((task) => task.task),
+    tokenUsage: aiTokenUsage(response, "create weekly plan"),
   };
 }
 
@@ -1814,8 +1931,8 @@ async function createAndSaveWeeklyPlan(projectKey = "", weekStart = currentWeekS
     const latestTarget = context.weeklyTargets[context.weeklyTargets.length - 1];
     const target = latestTarget
       ? {
-          refinedTarget: latestTarget.refinedTarget,
-          successCriteria: splitCellList(latestTarget.successCriteria),
+          refinedTarget: latestTarget.refined || latestTarget.raw || "No weekly target set yet.",
+          successCriteria: splitCellList(latestTarget.success),
           risks: splitCellList(latestTarget.risks),
           confidence: 0,
         }
@@ -1829,10 +1946,15 @@ async function createAndSaveWeeklyPlan(projectKey = "", weekStart = currentWeekS
 
     await ensureHeader(sheets, project, project.planSheetName, PLAN_HEADERS);
     await appendWeeklyPlanRows(sheets, project, weekStart, plan.tasks, source);
-    results.push({ project: project.label, weekStart, plan });
+    results.push({ project: project.label, weekStart, plan, tokenUsage: plan.tokenUsage });
   }
 
-  return { ok: true, weekStart, results };
+  return {
+    ok: true,
+    weekStart,
+    results,
+    tokenUsage: aggregateTokenUsage(results.map((result) => result.tokenUsage), "weekly plan"),
+  };
 }
 
 async function createDailySummary(date = todayBangkok(), projectKey = "dynozoic") {
@@ -1856,6 +1978,7 @@ async function createDailySummary(date = todayBangkok(), projectKey = "dynozoic"
       blockers: [],
       nextSteps: [],
       openFeedback,
+      tokenUsage: null,
     };
   }
 
@@ -1897,6 +2020,7 @@ async function createDailySummary(date = todayBangkok(), projectKey = "dynozoic"
     blockers,
     nextSteps,
     openFeedback,
+    tokenUsage: aiTokenUsage(responseAi, "daily summary"),
   };
 }
 
@@ -1905,6 +2029,10 @@ async function createAllDailyReports(date = todayBangkok()) {
   for (const project of Object.values(PROJECTS)) {
     summaries.push(await createDailySummary(date, project.key));
   }
+  summaries.tokenUsage = aggregateTokenUsage(
+    summaries.map((summary) => summary.tokenUsage),
+    "all daily summaries",
+  );
   return summaries;
 }
 
@@ -1924,6 +2052,10 @@ async function createWeeklyGoalReport(projectKey = "") {
     snapshots.push({
       project: project.label,
       team: teamPromptData(project.key),
+      timelineSchema: TIMELINE_COMPACT_SCHEMA,
+      feedbackSchema: FEEDBACK_COMPACT_SCHEMA,
+      targetSchema: TARGET_COMPACT_SCHEMA,
+      planSchema: PLAN_COMPACT_SCHEMA,
       savedTargets: context.weeklyTargets,
       savedPlan: context.currentPlan,
       updates: rowsToObjects(weekRows),
@@ -2003,6 +2135,10 @@ async function createCurrentTimelineAnalysisReport() {
     snapshots.push({
       project: project.label,
       team: teamPromptData(project.key),
+      timelineSchema: TIMELINE_COMPACT_SCHEMA,
+      feedbackSchema: FEEDBACK_COMPACT_SCHEMA,
+      targetSchema: TARGET_COMPACT_SCHEMA,
+      planSchema: PLAN_COMPACT_SCHEMA,
       recentTimeline: context.recentTimeline,
       openFeedback: context.openFeedback,
       weeklyTargets: context.weeklyTargets,
@@ -2280,22 +2416,26 @@ async function buildProjectManagementContext(sheets, project, weekStart) {
       weeklyTargets: Math.max(0, targetRows.length - 1),
       weeklyPlan: Math.max(0, planRows.length - 1),
     },
-    recentTimeline: timelineRowsForAi.map((item) => timelineRowToObject(item)),
+    timelineSchema: TIMELINE_COMPACT_SCHEMA,
+    feedbackSchema: FEEDBACK_COMPACT_SCHEMA,
+    targetSchema: TARGET_COMPACT_SCHEMA,
+    planSchema: PLAN_COMPACT_SCHEMA,
+    recentTimeline: timelineRowsForAi.map(compactTimelineRow),
     openFeedback: feedbackRows
       .slice(1)
       .map((row, index) => ({ row, rowNumber: index + 2 }))
       .filter((item) => String(item.row[6] || "").toLowerCase() !== "done")
-      .map((item) => feedbackRowToObject(item.row, item.rowNumber)),
+      .map(compactFeedbackRow),
     weeklyTargets: targetRows
       .slice(1)
       .map((row, index) => ({ row, rowNumber: index + 2 }))
       .filter((item) => item.row[0] === weekStart)
-      .map((item) => targetRowToObject(item.row, item.rowNumber)),
+      .map(compactTargetRow),
     currentPlan: planRows
       .slice(1)
       .map((row, index) => ({ row, rowNumber: index + 2 }))
       .filter((item) => item.row[0] === weekStart)
-      .map((item) => planRowToObject(item.row, item.rowNumber)),
+      .map(compactPlanRow),
   };
 }
 
@@ -2310,8 +2450,8 @@ async function buildFullDailyTaskContext(sheets, project, weekStart, reviewDate 
   const meaningfulTimelineRows = timelineDataRows
     .map((row, index) => ({ row, rowNumber: index + 2 }))
     .filter((item) => isMeaningfulSheetRow(item.row));
-  const fullTimeline = meaningfulTimelineRows.map((item) => sheetRowToObject(timelineHeaders, item.row, item.rowNumber));
-  const scheduleSignals = buildScheduleSignals(project, fullTimeline, reviewDate);
+  const fullTimelineObjects = meaningfulTimelineRows.map((item) => sheetRowToObject(timelineHeaders, item.row, item.rowNumber));
+  const scheduleSignals = buildScheduleSignals(project, fullTimelineObjects, reviewDate);
 
   return {
     project: project.label,
@@ -2331,24 +2471,28 @@ async function buildFullDailyTaskContext(sheets, project, weekStart, reviewDate 
     actualTimelineHeaders,
     expectedTimelineHeaders: TIMELINE_HEADERS,
     timelineHeaderMatchesExpected: TIMELINE_HEADERS.every((header, index) => actualTimelineHeaders[index] === header),
-    fullTimeline,
+    timelineSchema: TIMELINE_COMPACT_SCHEMA,
+    feedbackSchema: FEEDBACK_COMPACT_SCHEMA,
+    targetSchema: TARGET_COMPACT_SCHEMA,
+    planSchema: PLAN_COMPACT_SCHEMA,
+    fullTimeline: fullTimelineObjects.map(compactTimelineRow),
     scheduleSignals,
-    recentTimeline: meaningfulTimelineRows.slice(-10).map((item) => timelineRowToObject(item)),
+    recentTimeline: meaningfulTimelineRows.slice(-10).map(compactTimelineRow),
     openFeedback: feedbackRows
       .slice(1)
       .map((row, index) => ({ row, rowNumber: index + 2 }))
       .filter((item) => String(item.row[6] || "").toLowerCase() !== "done")
-      .map((item) => feedbackRowToObject(item.row, item.rowNumber)),
+      .map(compactFeedbackRow),
     weeklyTargets: targetRows
       .slice(1)
       .map((row, index) => ({ row, rowNumber: index + 2 }))
       .filter((item) => item.row[0] === weekStart)
-      .map((item) => targetRowToObject(item.row, item.rowNumber)),
+      .map(compactTargetRow),
     currentPlan: planRows
       .slice(1)
       .map((row, index) => ({ row, rowNumber: index + 2 }))
       .filter((item) => item.row[0] === weekStart)
-      .map((item) => planRowToObject(item.row, item.rowNumber)),
+      .map(compactPlanRow),
   };
 }
 
@@ -2378,8 +2522,8 @@ function normalizeTimelineHeaders(headers) {
 function sheetRowToObject(headers, row, rowNumber) {
   const fields = {};
   headers.forEach((header, index) => {
-    const value = row[index];
-    if (String(value || "").trim()) fields[header] = value;
+    const value = cleanSheetCellValue(row[index]);
+    if (value) fields[header] = value;
   });
 
   return {
@@ -2387,6 +2531,86 @@ function sheetRowToObject(headers, row, rowNumber) {
     ...timelineRowToObject({ row, rowNumber }),
     fields,
   };
+}
+
+function cleanSheetCellValue(value) {
+  return String(value ?? "")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function compactNonEmpty(object) {
+  return Object.fromEntries(
+    Object.entries(object)
+      .map(([key, value]) => [key, typeof value === "number" ? value : cleanSheetCellValue(value)])
+      .filter(([, value]) => value !== "" && value !== null && value !== undefined),
+  );
+}
+
+function compactTimelineRow(item) {
+  const row = item.row || item;
+  const rowNumber = item.rowNumber || row.rowNumber || 0;
+
+  return compactNonEmpty({
+    rowNumber,
+    id: row.id ?? row[0],
+    rock: row.rock ?? row[1],
+    pri: row.priority ?? row[2],
+    task: row.task ?? row[3],
+    start: row.start ?? row[4],
+    end: row.end ?? row[5],
+    blk: row.blockers ?? row[6],
+    pct: row.percent ?? row[7],
+    resp: row.response ?? row[8],
+    sub: row.subResponse ?? row[9],
+    status: row.statusLateDay ?? row[10],
+  });
+}
+
+function compactFeedbackRow(row) {
+  const item = feedbackRowToObject(row.row || row, row.rowNumber || 0);
+  return compactNonEmpty({
+    rowNumber: item.rowNumber,
+    date: item.date,
+    dev: item.developer,
+    feedback: item.feedback,
+    summary: item.summary,
+    cat: item.category,
+    action: item.suggestedAction,
+    status: item.status,
+  });
+}
+
+function compactTargetRow(row) {
+  const item = targetRowToObject(row.row || row, row.rowNumber || 0);
+  return compactNonEmpty({
+    rowNumber: item.rowNumber,
+    week: item.weekStart,
+    project: item.project,
+    owner: item.owner,
+    raw: item.rawTarget,
+    refined: item.refinedTarget,
+    success: item.successCriteria,
+    risks: item.risks,
+    source: item.source,
+  });
+}
+
+function compactPlanRow(row) {
+  const item = planRowToObject(row.row || row, row.rowNumber || 0);
+  return compactNonEmpty({
+    rowNumber: item.rowNumber,
+    week: item.weekStart,
+    project: item.project,
+    assignee: item.assignee,
+    role: item.role,
+    task: item.task,
+    pri: item.priority,
+    success: item.successCriteria,
+    deps: item.dependencies,
+    status: item.status,
+  });
 }
 
 function buildScheduleSignals(project, fullTimeline, reviewDate) {
@@ -2410,14 +2634,14 @@ function buildScheduleSignals(project, fullTimeline, reviewDate) {
 
     const item = {
       rowNumber: row.rowNumber,
-      rock: row.rock || "",
-      title: analysis.title,
-      owner: analysis.owner,
-      status: analysis.status,
+      rock: cleanSheetCellValue(row.rock),
+      title: cleanSheetCellValue(analysis.title),
+      owner: cleanSheetCellValue(analysis.owner),
+      status: cleanSheetCellValue(analysis.status),
       percent: analysis.percent,
       dates: analysis.dates,
       deadlineDates: analysis.deadlineDates,
-      blockers: analysis.blockers,
+      blockers: cleanSheetCellValue(analysis.blockers),
     };
 
     if (analysis.blockers) signals.blocked.push(item);
@@ -3204,6 +3428,8 @@ function createAdminStatus(req) {
     ai: {
       grokConfigured: Boolean(env.grokApiKey),
       model: env.grokModel,
+      contextWindowTokens: env.grokContextWindow || null,
+      contextWindowSource: env.grokContextWindow ? "env" : "unknown",
     },
     google: {
       serviceAccountConfigured: Boolean(env.googleServiceAccountEmail && env.googlePrivateKey),

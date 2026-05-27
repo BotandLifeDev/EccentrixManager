@@ -273,7 +273,7 @@ async function loadSavedDailyTasks(form = document.querySelector("#dailyTaskLoad
 async function regenerateDailyTasks(form = document.querySelector("#dailyTaskLoadForm")) {
   const button = form?.querySelector('button[type="submit"]');
   const date = form?.elements.date?.value || new Date().toISOString().slice(0, 10);
-  dailyTaskBoard.innerHTML = '<div class="empty-state">AI is analyzing the full timelines for both games...</div>';
+  dailyTaskBoard.innerHTML = '<div class="empty-state">Loading filtered daily work from Google Sheets...</div>';
 
   const result = await postJson("/daily-tasks", { date, regenerate: true }, button);
   if (!result) {
@@ -332,7 +332,7 @@ async function loadSavedWeeklyTasks(form = document.querySelector("#dailyTaskLoa
 async function regenerateWeeklyTasks(form = document.querySelector("#dailyTaskLoadForm")) {
   const button = document.querySelector("#regenWeeklyBtn");
   const weekStart = weekStartFromDate(form?.elements.date?.value || new Date().toISOString().slice(0, 10));
-  weeklyTaskBoard.innerHTML = '<div class="empty-state">AI is planning the full week from both timelines...</div>';
+  weeklyTaskBoard.innerHTML = '<div class="empty-state">Loading filtered weekly work from Google Sheets...</div>';
 
   const result = await postJson("/weekly-tasks", { weekStart, regenerate: true }, button);
   if (!result) {
@@ -421,16 +421,19 @@ async function submitDailyTasks(form) {
     developer,
     note,
     progressItems,
+    scope: "daily",
   }, button);
 
   if (result) {
     form.elements.note.value = "";
+    applyRefreshedTaskBoard(result);
     print(result);
   }
 }
 
 async function submitSelectedTaskBoard(board, scope, button) {
   const date = document.querySelector("#dailyTaskLoadForm")?.elements.date?.value || new Date().toISOString().slice(0, 10);
+  const weekStart = weekStartFromDate(date);
   const progressItems = collectProgressItemsFromBoard(board);
 
   if (progressItems.length === 0) {
@@ -438,12 +441,31 @@ async function submitSelectedTaskBoard(board, scope, button) {
     return;
   }
 
-  await postJson("/daily-task-submit", {
+  const result = await postJson("/daily-task-submit", {
     date,
+    weekStart,
+    scope,
     developer: "Team",
     note: `${scope === "weekly" ? "Weekly" : "Daily"} selected slider progress submission.`,
     progressItems,
   }, button);
+  applyRefreshedTaskBoard(result);
+}
+
+function applyRefreshedTaskBoard(result) {
+  const board = result?.refreshedBoard;
+  if (!board?.people?.length) return;
+
+  if (result.refreshedScope === "weekly" || board.weekStart) {
+    saveLocalWeeklyTasks(board);
+    state.weeklyTasks = board;
+    renderWeeklyTasks(board);
+    return;
+  }
+
+  saveLocalDailyTasks(board);
+  state.dailyTasks = board;
+  renderDailyTasks(board);
 }
 
 async function postJson(endpoint, body, button) {

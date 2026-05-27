@@ -306,6 +306,7 @@ let dailyReportTimer = null;
 const dailyTaskCache = new Map();
 const weeklyTaskCache = new Map();
 const milestoneReviewCache = new Map();
+const taskLocks = new Map();
 
 const PM_ASSISTANT_SYSTEM_PROMPT = [
   "You are an AI Project Manager Assistant responsible for managing project updates, timelines, reporting, and workflow organization.",
@@ -553,7 +554,7 @@ app.post("/daily-tasks", async (req, res) => {
     const date = normalizeDate(req.body.date);
     const regenerate = req.body.regenerate === true;
     const result = regenerate
-      ? await createDailyTaskBoard(date)
+      ? await withTaskLock(`daily:${date}`, () => createDailyTaskBoard(date))
       : await getCachedDailyTaskBoard(date);
     res.json(result || {
       ok: true,
@@ -569,7 +570,10 @@ app.post("/daily-tasks", async (req, res) => {
 app.post("/daily-task-submit", async (req, res) => {
   try {
     assertWebAuth(req);
-    const result = await handleDailyTaskSubmission(req.body);
+    const result = await withTaskLock(
+      taskSubmissionLockKey(req.body),
+      () => handleDailyTaskSubmission(req.body),
+    );
     res.status(201).json(result);
   } catch (error) {
     sendHttpError(res, error);
@@ -598,7 +602,7 @@ app.post("/weekly-tasks", async (req, res) => {
     const weekStart = normalizeWeekStart(req.body.weekStart || req.body.date);
     const regenerate = req.body.regenerate === true;
     const result = regenerate
-      ? await createWeeklyTaskBoard(weekStart)
+      ? await withTaskLock(`weekly:${weekStart}`, () => createWeeklyTaskBoard(weekStart))
       : await getCachedWeeklyTaskBoard(weekStart);
     res.json(result || {
       ok: true,
@@ -954,6 +958,8 @@ async function handleDailyTaskSubmission(body) {
   validateSheetRuntimeConfig();
 
   const date = normalizeDate(body.date);
+  const scope = String(body.scope || "").trim().toLowerCase() === "weekly" ? "weekly" : "daily";
+  const weekStart = normalizeWeekStart(body.weekStart || date);
   const developer = normalizePersonName(body.developer || body.member || body.name || "Unknown");
   const note = String(body.note || body.text || body.message || "").trim();
   const progressItems = normalizeDailyProgressItems(body.progressItems);
@@ -987,6 +993,11 @@ async function handleDailyTaskSubmission(body) {
     `${date}:${Date.now()}`,
     result,
   );
+
+  result.refreshedBoard = scope === "weekly"
+    ? await createWeeklyTaskBoard(weekStart)
+    : await createDailyTaskBoard(date);
+  result.refreshedScope = scope;
 
   return result;
 }
@@ -2568,6 +2579,36 @@ function chunkText(value, size) {
 
 function getDatabaseProject() {
   return resolveProject(process.env.DATABASE_PROJECT || "dynozoic");
+}
+
+async function withTaskLock(key, operation) {
+  const lockKey = cleanSheetCellValue(key) || "global";
+  const previous = taskLocks.get(lockKey) || Promise.resolve();
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const tail = previous.catch(() => {}).then(() => gate);
+  taskLocks.set(lockKey, tail);
+
+  try {
+    await previous.catch(() => {});
+    return await operation();
+  } finally {
+    release();
+    if (taskLocks.get(lockKey) === tail) {
+      taskLocks.delete(lockKey);
+    }
+  }
+}
+
+function taskSubmissionLockKey(body) {
+  const scope = String(body?.scope || "").trim().toLowerCase() === "weekly" ? "weekly" : "daily";
+  const date = normalizeDate(body?.date);
+  const key = scope === "weekly"
+    ? normalizeWeekStart(body?.weekStart || date)
+    : date;
+  return `${scope}:${key}`;
 }
 
 function normalizeSheetHeaders(headers) {

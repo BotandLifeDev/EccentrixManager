@@ -1098,7 +1098,7 @@ async function createWeeklyTaskBoard(weekStart = currentWeekStartBangkok()) {
 }
 
 async function createMilestoneReview(date = todayBangkok()) {
-  validateRuntimeConfig();
+  validateSheetRuntimeConfig();
 
   const sheets = await getSheetsClient();
   const weekStart = normalizeWeekStart(date);
@@ -1114,49 +1114,10 @@ async function createMilestoneReview(date = todayBangkok()) {
     ));
   }
 
-  const response = await grok.chat.completions.create({
-    model: env.grokModel,
-    temperature: 0.1,
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: [
-          PM_ASSISTANT_SYSTEM_PROMPT,
-          "Create a milestone review for both game projects at the same 06:00 Bangkok morning review time as Daily Tasks.",
-          "The timeline sheet header schema is fixed and must be interpreted exactly as: ID, Rock, Priority, Task, Start, End, Blockers, Percent, Response, Sub Response, Status&LateDay.",
-          "Sheet rows are compacted to save tokens. Use each project's timelineSchema, feedbackSchema, targetSchema, and planSchema to interpret short field names. rowNumber is always the Google Sheet row number.",
-          "fullTimeline is encoded as compact arrays. Use timelineColumns as the column order for every fullTimeline row.",
-          "Never ask to edit, rename, insert, delete, or overwrite these headers.",
-          "You must inspect 100% of each project's provided fullTimeline rows before estimating milestone progress.",
-          "scheduleSignals is precomputed by the backend from the full timeline. Use it to identify late, due soon, blocked, low progress, and currently scheduled milestone work.",
-          "Use Start as the planned start date, End as the deadline/end date, Percent as completion percentage, Blockers as blocking issues, Priority as urgency, Task as the work item, Rock as milestone/rock grouping, Response/Sub Response as owner or response context, and Status&LateDay as late/status signal.",
-          "Analyze current milestone progress, actual completion percentage, schedule pressure, deadline risk, blockers, smooth areas, and next recommendations.",
-          "Do not claim a percentage without explaining the evidence used from the timeline.",
-          "Return only valid JSON with keys: headline, summary, overallPercent, projects, concerns, smoothAreas, recommendations.",
-          "projects is an array with projectKey, project, currentMilestone, percentComplete, status, deadlineStatus, concerns, smoothAreas, evidenceRows, nextReviewFocus.",
-          "status must be one of: smooth, watch, risk, blocked.",
-          "deadlineStatus should explain whether timing is on track, tight, late, unknown, or blocked.",
-          "evidenceRows is an array of Google Sheet row numbers used as evidence.",
-          "Percent values must be numbers from 0 to 100. Keep Thai wording when the sheet context is Thai.",
-        ].join("\n"),
-      },
-      {
-        role: "user",
-        content: JSON.stringify({
-          today: date,
-          morningReviewTime: env.dailyTaskTime,
-          team: teamPromptData(),
-          projects: contexts,
-          contextSummary: summarizeProjectContexts(contexts),
-          scheduleSignals: contexts.map((context) => context.scheduleSignals),
-        }),
-      },
-    ],
-  });
-
-  const parsed = parseJsonObject(response.choices?.[0]?.message?.content);
-  const projects = normalizeMilestoneProjects(parsed.projects);
+  const projects = buildRuleBasedMilestoneProjects(contexts, date);
+  const concerns = buildRuleBasedRiskList(contexts);
+  const smoothAreas = buildRuleBasedSmoothAreas(projects);
+  const recommendations = buildRuleBasedMilestoneRecommendations(projects);
 
   const result = {
     ok: true,
@@ -1164,16 +1125,16 @@ async function createMilestoneReview(date = todayBangkok()) {
     date,
     generatedAt: new Date().toISOString(),
     morningReviewTime: env.dailyTaskTime,
-    headline: String(parsed.headline || "Milestone Review").trim(),
-    summary: String(parsed.summary || "").trim(),
-    overallPercent: clampPercent(parsed.overallPercent ?? averagePercent(projects)),
+    headline: "Milestone Review",
+    summary: buildRuleBasedMilestoneSummary(projects),
+    overallPercent: averagePercent(projects),
     projects,
-    concerns: asArray(parsed.concerns),
-    smoothAreas: asArray(parsed.smoothAreas),
-    recommendations: asArray(parsed.recommendations),
+    concerns,
+    smoothAreas,
+    recommendations,
     contextSummary: summarizeProjectContexts(contexts),
     scheduleSignals: contexts.map((context) => context.scheduleSignals),
-    tokenUsage: aiTokenUsage(response, "milestone review"),
+    tokenUsage: null,
   };
 
   milestoneReviewCache.set(date, result);
@@ -4088,6 +4049,105 @@ function buildRuleBasedFinishList(contexts) {
       return `${context.project}: row ${item.rowNumber} - ${item.task}`;
     }))
     .slice(0, 20);
+}
+
+function buildRuleBasedMilestoneProjects(contexts, reviewDate) {
+  return contexts.map((context) => {
+    const rows = (context.fullTimeline || []).map(compactTimelineArrayToObject);
+    const activeRows = rows.filter((row) => cleanSheetCellValue(row.task));
+    const percents = activeRows.map((row) => clampPercent(row.pct));
+    const percentComplete = percents.length
+      ? Math.round(percents.reduce((sum, value) => sum + value, 0) / percents.length)
+      : 0;
+    const blockedRows = activeRows.filter((row) => cleanSheetCellValue(row.blk));
+    const overdueRows = activeRows.filter((row) => (
+      getTimelineRowScheduleInfo(row).endTimes.some((time) => time < dateToBangkokTime(reviewDate))
+      && clampPercent(row.pct) < 100
+    ));
+    const dueSoonRows = context.scheduleSignals?.dueSoon || [];
+    const currentMilestone = mostCommonValue(activeRows.map((row) => cleanSheetCellValue(row.rock))) || "Current milestone";
+
+    return {
+      projectKey: context.projectKey,
+      project: context.project,
+      currentMilestone,
+      percentComplete,
+      status: milestoneStatusFromRows({ blockedRows, overdueRows, dueSoonRows, percentComplete }),
+      deadlineStatus: milestoneDeadlineStatus({ overdueRows, dueSoonRows, activeRows }),
+      concerns: [
+        ...overdueRows.slice(0, 4).map((row) => `Overdue row ${row.rowNumber}: ${row.task}`),
+        ...blockedRows.slice(0, 4).map((row) => `Blocked row ${row.rowNumber}: ${row.task}`),
+      ],
+      smoothAreas: activeRows
+        .filter((row) => clampPercent(row.pct) >= 100)
+        .slice(0, 4)
+        .map((row) => `Done row ${row.rowNumber}: ${row.task}`),
+      evidenceRows: activeRows
+        .slice()
+        .sort((a, b) => sortMilestoneEvidenceRow(b, reviewDate) - sortMilestoneEvidenceRow(a, reviewDate))
+        .slice(0, 12)
+        .map((row) => Number(row.rowNumber))
+        .filter((rowNumber) => Number.isInteger(rowNumber) && rowNumber >= 2),
+      nextReviewFocus: activeRows
+        .filter((row) => clampPercent(row.pct) < 100)
+        .slice(0, 5)
+        .map((row) => `Row ${row.rowNumber}: ${row.task}`),
+    };
+  });
+}
+
+function milestoneStatusFromRows({ blockedRows, overdueRows, dueSoonRows, percentComplete }) {
+  if (blockedRows.length > 0) return "blocked";
+  if (overdueRows.length > 0) return "risk";
+  if (dueSoonRows.length > 0 || percentComplete < 50) return "watch";
+  return "smooth";
+}
+
+function milestoneDeadlineStatus({ overdueRows, dueSoonRows, activeRows }) {
+  if (overdueRows.length > 0) return `${overdueRows.length} overdue unfinished row(s)`;
+  if (dueSoonRows.length > 0) return `${dueSoonRows.length} due soon row(s)`;
+  if (activeRows.length === 0) return "No timeline rows found";
+  return "No overdue rows detected";
+}
+
+function sortMilestoneEvidenceRow(row, reviewDate) {
+  const percent = clampPercent(row.pct);
+  const schedule = getTimelineRowScheduleInfo(row);
+  const overdueScore = schedule.endTimes.some((time) => time < dateToBangkokTime(reviewDate)) ? 1000 : 0;
+  const blockerScore = cleanSheetCellValue(row.blk) ? 500 : 0;
+  return overdueScore + blockerScore + (100 - percent);
+}
+
+function buildRuleBasedMilestoneSummary(projects) {
+  const parts = projects.map((project) => (
+    `${project.project}: ${project.percentComplete}% ${project.status} (${project.deadlineStatus})`
+  ));
+  return `Milestone review generated directly from Google Sheets without AI. ${parts.join(" | ")}`;
+}
+
+function buildRuleBasedSmoothAreas(projects) {
+  return projects.flatMap((project) => (
+    project.smoothAreas.length
+      ? project.smoothAreas.map((item) => `${project.project}: ${item}`)
+      : [`${project.project}: ${project.deadlineStatus}`]
+  )).slice(0, 12);
+}
+
+function buildRuleBasedMilestoneRecommendations(projects) {
+  return projects.flatMap((project) => {
+    if (project.status === "blocked") return [`${project.project}: clear blockers first`];
+    if (project.status === "risk") return [`${project.project}: recover overdue unfinished rows`];
+    if (project.status === "watch") return [`${project.project}: review due-soon or low-progress rows`];
+    return [`${project.project}: continue current plan`];
+  });
+}
+
+function mostCommonValue(values) {
+  const counts = new Map();
+  for (const value of values.filter(Boolean)) {
+    counts.set(value, (counts.get(value) || 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || "";
 }
 
 function normalizeDailyTaskPeople(people) {

@@ -168,6 +168,15 @@ const PLAN_HEADERS = [
   "Created At",
 ];
 
+const DATABASE_SHEET_NAME = "Database";
+const DATABASE_HEADERS = [
+  "Type",
+  "Key",
+  "Date",
+  "Payload",
+  "Updated At",
+];
+
 const TIMELINE_EDIT_FIELDS = {
   id: { header: "ID", column: "A" },
   rock: { header: "Rock", column: "B" },
@@ -521,11 +530,11 @@ app.post("/assistant/chat", async (req, res) => {
   }
 });
 
-app.get("/daily-tasks", (req, res) => {
+app.get("/daily-tasks", async (req, res) => {
   try {
     assertWebAuth(req);
     const date = normalizeDate(req.query.date);
-    const cached = getCachedDailyTaskBoard(date);
+    const cached = await getCachedDailyTaskBoard(date);
     res.json(cached || {
       ok: true,
       cached: false,
@@ -544,7 +553,7 @@ app.post("/daily-tasks", async (req, res) => {
     const regenerate = req.body.regenerate === true;
     const result = regenerate
       ? await createDailyTaskBoard(date)
-      : getCachedDailyTaskBoard(date);
+      : await getCachedDailyTaskBoard(date);
     res.json(result || {
       ok: true,
       cached: false,
@@ -566,11 +575,11 @@ app.post("/daily-task-submit", async (req, res) => {
   }
 });
 
-app.get("/weekly-tasks", (req, res) => {
+app.get("/weekly-tasks", async (req, res) => {
   try {
     assertWebAuth(req);
     const weekStart = normalizeWeekStart(req.query.weekStart || req.query.date);
-    const cached = getCachedWeeklyTaskBoard(weekStart);
+    const cached = await getCachedWeeklyTaskBoard(weekStart);
     res.json(cached || {
       ok: true,
       cached: false,
@@ -589,7 +598,7 @@ app.post("/weekly-tasks", async (req, res) => {
     const regenerate = req.body.regenerate === true;
     const result = regenerate
       ? await createWeeklyTaskBoard(weekStart)
-      : getCachedWeeklyTaskBoard(weekStart);
+      : await getCachedWeeklyTaskBoard(weekStart);
     res.json(result || {
       ok: true,
       cached: false,
@@ -601,11 +610,11 @@ app.post("/weekly-tasks", async (req, res) => {
   }
 });
 
-app.get("/milestone-review", (req, res) => {
+app.get("/milestone-review", async (req, res) => {
   try {
     assertWebAuth(req);
     const date = normalizeDate(req.query.date);
-    const cached = getCachedMilestoneReview(date);
+    const cached = await getCachedMilestoneReview(date);
     res.json(cached || {
       ok: true,
       cached: false,
@@ -624,7 +633,7 @@ app.post("/milestone-review", async (req, res) => {
     const regenerate = req.body.regenerate === true;
     const result = regenerate
       ? await createMilestoneReview(date)
-      : getCachedMilestoneReview(date);
+      : await getCachedMilestoneReview(date);
     res.json(result || {
       ok: true,
       cached: false,
@@ -936,6 +945,7 @@ async function createDailyTaskBoard(date = todayBangkok()) {
   };
 
   dailyTaskCache.set(date, result);
+  await saveGeneratedResultToDatabase("daily-tasks", date, result);
   return result;
 }
 
@@ -957,7 +967,7 @@ async function handleDailyTaskSubmission(body) {
   const directProgressAction = await applySubmittedProgressPercents(sheets, progressItems);
   const appliedActions = [directProgressAction].filter(Boolean);
 
-  return {
+  const result = {
     ok: true,
     date,
     developer,
@@ -970,6 +980,14 @@ async function handleDailyTaskSubmission(body) {
     actionsApplied: appliedActions,
     tokenUsage: null,
   };
+
+  await saveGeneratedResultToDatabase(
+    "daily-task-submit",
+    `${date}:${Date.now()}`,
+    result,
+  );
+
+  return result;
 }
 
 async function applySubmittedProgressPercents(sheets, progressItems) {
@@ -1056,6 +1074,7 @@ async function createWeeklyTaskBoard(weekStart = currentWeekStartBangkok()) {
   };
 
   weeklyTaskCache.set(normalizedWeekStart, result);
+  await saveGeneratedResultToDatabase("weekly-tasks", normalizedWeekStart, result);
   return result;
 }
 
@@ -1139,6 +1158,7 @@ async function createMilestoneReview(date = todayBangkok()) {
   };
 
   milestoneReviewCache.set(date, result);
+  await saveGeneratedResultToDatabase("milestone-review", date, result);
   return result;
 }
 
@@ -2419,19 +2439,99 @@ async function buildFullDailyTaskContext(
   };
 }
 
-function getCachedDailyTaskBoard(date) {
+async function getCachedDailyTaskBoard(date) {
+  const saved = await loadGeneratedResultFromDatabase("daily-tasks", date);
+  if (saved) return { ...saved, cached: true, cacheSource: "Database" };
   const cached = dailyTaskCache.get(date);
-  return cached ? { ...cached, cached: true } : null;
+  return cached ? { ...cached, cached: true, cacheSource: "memory" } : null;
 }
 
-function getCachedWeeklyTaskBoard(weekStart) {
+async function getCachedWeeklyTaskBoard(weekStart) {
+  const saved = await loadGeneratedResultFromDatabase("weekly-tasks", weekStart);
+  if (saved) return { ...saved, cached: true, cacheSource: "Database" };
   const cached = weeklyTaskCache.get(weekStart);
-  return cached ? { ...cached, cached: true } : null;
+  return cached ? { ...cached, cached: true, cacheSource: "memory" } : null;
 }
 
-function getCachedMilestoneReview(date) {
+async function getCachedMilestoneReview(date) {
+  const saved = await loadGeneratedResultFromDatabase("milestone-review", date);
+  if (saved) return { ...saved, cached: true, cacheSource: "Database" };
   const cached = milestoneReviewCache.get(date);
-  return cached ? { ...cached, cached: true } : null;
+  return cached ? { ...cached, cached: true, cacheSource: "memory" } : null;
+}
+
+async function saveGeneratedResultToDatabase(type, key, payload) {
+  validateSheetRuntimeConfig();
+  const sheets = await getSheetsClient();
+  const project = getDatabaseProject();
+  await ensureHeader(sheets, project, DATABASE_SHEET_NAME, DATABASE_HEADERS);
+
+  const rows = await readDatabaseRows(sheets, project);
+  const normalizedType = cleanSheetCellValue(type);
+  const normalizedKey = cleanSheetCellValue(key);
+  const rowIndex = rows.findIndex((row, index) => (
+    index > 0
+    && cleanSheetCellValue(row[0]) === normalizedType
+    && cleanSheetCellValue(row[1]) === normalizedKey
+  ));
+  const values = [[
+    normalizedType,
+    normalizedKey,
+    payload.date || payload.weekStart || normalizedKey,
+    JSON.stringify(payload),
+    new Date().toISOString(),
+  ]];
+
+  if (rowIndex >= 0) {
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: project.spreadsheetId,
+      range: `${quoteSheet(DATABASE_SHEET_NAME)}!A${rowIndex + 1}:E${rowIndex + 1}`,
+      valueInputOption: "RAW",
+      requestBody: { values },
+    });
+    return;
+  }
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: project.spreadsheetId,
+    range: `${quoteSheet(DATABASE_SHEET_NAME)}!A:E`,
+    valueInputOption: "RAW",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: { values },
+  });
+}
+
+async function loadGeneratedResultFromDatabase(type, key) {
+  try {
+    validateSheetRuntimeConfig();
+    const sheets = await getSheetsClient();
+    const project = getDatabaseProject();
+    await ensureHeader(sheets, project, DATABASE_SHEET_NAME, DATABASE_HEADERS);
+    const rows = await readDatabaseRows(sheets, project);
+    const normalizedType = cleanSheetCellValue(type);
+    const normalizedKey = cleanSheetCellValue(key);
+    const found = rows.slice(1).find((row) => (
+      cleanSheetCellValue(row[0]) === normalizedType
+      && cleanSheetCellValue(row[1]) === normalizedKey
+    ));
+    if (!found?.[3]) return null;
+    return JSON.parse(found[3]);
+  } catch (error) {
+    console.error("Database load failed:", error.message);
+    return null;
+  }
+}
+
+async function readDatabaseRows(sheets, project) {
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: project.spreadsheetId,
+    range: `${quoteSheet(DATABASE_SHEET_NAME)}!A:E`,
+  });
+  return response.data.values || [];
+}
+
+function getDatabaseProject() {
+  return resolveProject(process.env.DATABASE_PROJECT || "dynozoic");
 }
 
 function normalizeSheetHeaders(headers) {
@@ -3512,6 +3612,10 @@ function createAdminStatus(req) {
           feedback: PROJECTS.eaa.feedbackSheetName,
           targets: PROJECTS.eaa.targetSheetName,
           plan: PROJECTS.eaa.planSheetName,
+        },
+        database: {
+          project: getDatabaseProject().key,
+          tab: DATABASE_SHEET_NAME,
         },
       },
     },

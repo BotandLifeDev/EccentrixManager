@@ -176,7 +176,12 @@ const DATABASE_HEADERS = [
   "Payload",
   "Updated At",
 ];
+const SETTINGS_SHEET_NAME = "Settings";
+const SETTINGS_HEADERS = ["Key", "Value", "Notes"];
 const DATABASE_PAYLOAD_CHUNK_SIZE = 45000;
+const DATABASE_CACHE_RETENTION_DAYS = Number(process.env.DATABASE_CACHE_RETENTION_DAYS || 30);
+const DATABASE_AUDIT_RETENTION_DAYS = Number(process.env.DATABASE_AUDIT_RETENTION_DAYS || 90);
+const DEFAULT_DUE_SOON_DAYS = Number(process.env.DUE_SOON_DAYS || 3);
 
 const TIMELINE_EDIT_FIELDS = {
   id: { header: "ID", column: "A" },
@@ -242,6 +247,25 @@ const ACTIVE_TEAM_MEMBERS = [
     name: "\u0e20\u0e39\u0e1c\u0e32",
     role: "Main developer for Dynozoic",
     projects: ["dynozoic"],
+  },
+];
+
+const OWNER_ALIAS_RULES = [
+  {
+    name: "\u0e17\u0e35\u0e19",
+    aliases: ["ทีน", "teen", "tin", "team lead", "lead", "pm", "producer", "manager", "plan", "planning", "review", "priority", "schedule"],
+  },
+  {
+    name: "\u0e41\u0e21\u0e19",
+    aliases: ["แมน", "man", "art", "artist", "sprite", "sprites", "vfx", "fx", "animation", "anim", "ui art", "visual", "texture", "concept", "asset"],
+  },
+  {
+    name: "\u0e19\u0e19",
+    aliases: ["นน", "non", "nont", "code", "coding", "program", "programming", "enemy", "checkpoint", "save", "load", "eaa", "earth atlantis", "abyss", "underwater"],
+  },
+  {
+    name: "\u0e20\u0e39\u0e1c\u0e32",
+    aliases: ["ภูผา", "phupha", "phu pha", "dyno", "dynozoic", "dino", "system", "systems", "gameplay", "combat", "level", "quest", "core"],
   },
 ];
 
@@ -338,6 +362,37 @@ app.get("/admin/status", (req, res) => {
   try {
     assertWebAuth(req);
     res.json(createAdminStatus(req));
+  } catch (error) {
+    sendHttpError(res, error);
+  }
+});
+
+app.get("/dashboard", async (req, res) => {
+  try {
+    assertWebAuth(req);
+    const date = normalizeDate(req.query.date);
+    const result = await createRuleBasedDashboard(date);
+    res.json(result);
+  } catch (error) {
+    sendHttpError(res, error);
+  }
+});
+
+app.get("/settings", async (req, res) => {
+  try {
+    assertWebAuth(req);
+    const result = await getSettingsForUi();
+    res.json(result);
+  } catch (error) {
+    sendHttpError(res, error);
+  }
+});
+
+app.post("/settings", async (req, res) => {
+  try {
+    assertWebAuth(req);
+    const result = await saveSettingsFromUi(req.body);
+    res.json(result);
   } catch (error) {
     sendHttpError(res, error);
   }
@@ -522,6 +577,26 @@ app.post("/timeline-analysis", async (req, res) => {
   }
 });
 
+app.post("/sync-status", async (req, res) => {
+  try {
+    assertWebAuth(req);
+    const result = await withTaskLock("sync-status", () => syncTimelineStatuses(req.body.project || ""));
+    res.json(result);
+  } catch (error) {
+    sendHttpError(res, error);
+  }
+});
+
+app.post("/database/cleanup", async (req, res) => {
+  try {
+    assertWebAuth(req);
+  const result = await withTaskLock("database-cleanup", () => cleanupDatabase(req.body || {}));
+    res.json(result);
+  } catch (error) {
+    sendHttpError(res, error);
+  }
+});
+
 app.post("/assistant/chat", async (req, res) => {
   try {
     assertWebAuth(req);
@@ -610,6 +685,18 @@ app.post("/weekly-tasks", async (req, res) => {
       weekStart,
       message: "No saved weekly task board for this week. Send regenerate=true to create one.",
     });
+  } catch (error) {
+    sendHttpError(res, error);
+  }
+});
+
+app.get("/rule-preview", async (req, res) => {
+  try {
+    assertWebAuth(req);
+    const date = normalizeDate(req.query.date);
+    const scope = String(req.query.scope || "daily").trim().toLowerCase() === "weekly" ? "weekly" : "daily";
+    const result = await createRulePreview(date, scope);
+    res.json(result);
   } catch (error) {
     sendHttpError(res, error);
   }
@@ -919,6 +1006,7 @@ async function createDailyTaskBoard(date = todayBangkok()) {
   validateSheetRuntimeConfig();
 
   const sheets = await getSheetsClient();
+  const settings = await loadAppSettings(sheets);
   const weekStart = normalizeWeekStart(date);
   const contexts = [];
 
@@ -932,7 +1020,7 @@ async function createDailyTaskBoard(date = todayBangkok()) {
     ));
   }
 
-  const people = buildRuleBasedDailyTaskPeople(contexts, date);
+  const people = buildRuleBasedDailyTaskPeople(contexts, date, settings);
 
   const result = {
     ok: true,
@@ -957,6 +1045,8 @@ async function createDailyTaskBoard(date = todayBangkok()) {
 async function handleDailyTaskSubmission(body) {
   validateSheetRuntimeConfig();
 
+  const sheets = await getSheetsClient();
+  const settings = await loadAppSettings(sheets);
   const date = normalizeDate(body.date);
   const scope = String(body.scope || "").trim().toLowerCase() === "weekly" ? "weekly" : "daily";
   const weekStart = normalizeWeekStart(body.weekStart || date);
@@ -970,17 +1060,20 @@ async function handleDailyTaskSubmission(body) {
     throw error;
   }
 
-  const sheets = await getSheetsClient();
-  const directProgressAction = await applySubmittedProgressPercents(sheets, progressItems);
+  const directProgressAction = await applySubmittedProgressPercents(sheets, progressItems, {
+    date,
+    developer,
+    scope,
+    note,
+    settings,
+  });
   const appliedActions = [directProgressAction].filter(Boolean);
 
   const result = {
     ok: true,
     date,
     developer,
-    reply: appliedActions.length
-      ? `Updated ${directProgressAction.editedCells} timeline progress cell(s) directly from the selected task board.`
-      : "No timeline rows were updated. Select tasks with row numbers before submitting.",
+    reply: buildProgressSubmitReply(directProgressAction),
     visualProgressOverview: null,
     note,
     actionsRequested: [],
@@ -993,6 +1086,20 @@ async function handleDailyTaskSubmission(body) {
     `${date}:${Date.now()}`,
     result,
   );
+  if (directProgressAction?.auditLog?.length) {
+    await saveGeneratedResultToDatabase(
+      "progress-audit",
+      `${date}:${Date.now()}:${developer}`,
+      {
+        ok: true,
+        date,
+        developer,
+        scope,
+        note,
+        auditLog: directProgressAction.auditLog,
+      },
+    );
+  }
 
   result.refreshedBoard = scope === "weekly"
     ? await createWeeklyTaskBoard(weekStart)
@@ -1002,7 +1109,7 @@ async function handleDailyTaskSubmission(body) {
   return result;
 }
 
-async function applySubmittedProgressPercents(sheets, progressItems) {
+async function applySubmittedProgressPercents(sheets, progressItems, meta = {}) {
   const updatesByProject = new Map();
 
   for (const item of progressItems) {
@@ -1014,20 +1121,73 @@ async function applySubmittedProgressPercents(sheets, progressItems) {
       updatesByProject.set(project.key, { project, rows: new Map() });
     }
 
-    updatesByProject.get(project.key).rows.set(
-      item.timelineRowNumber,
-      formatPercentForSheet(item.percent),
-    );
+    updatesByProject.get(project.key).rows.set(item.timelineRowNumber, {
+      percent: item.percent,
+      originalPercent: item.originalPercent,
+      title: item.title,
+    });
   }
 
   const projects = [];
+  const auditLog = [];
 
   for (const { project, rows } of updatesByProject.values()) {
     await ensureHeader(sheets, project, project.sheetName, TIMELINE_HEADERS);
-    const ranges = [...rows.entries()].map(([rowNumber, percent]) => ({
-      range: `${quoteSheet(project.sheetName)}!H${rowNumber}`,
-      values: [[percent]],
-    }));
+    const sheetRows = await readRows(sheets, project, project.sheetName, "A:K");
+    const ranges = [];
+    const updatedRowNumbers = [];
+
+    for (const [rowNumber, update] of rows.entries()) {
+      const oldRow = sheetRows[rowNumber - 1] || [];
+      const oldPercent = clampPercent(oldRow[7]);
+      const expectedPercent = update.originalPercent;
+      const newPercent = clampPercent(update.percent);
+      if (expectedPercent !== null && oldPercent !== expectedPercent) {
+        auditLog.push({
+          conflict: true,
+          project: project.key,
+          projectLabel: project.label,
+          rowNumber,
+          task: cleanSheetCellValue(oldRow[3] || update.title),
+          expectedPercent,
+          actualPercent: oldPercent,
+          requestedPercent: newPercent,
+          oldStatus: cleanSheetCellValue(oldRow[10]),
+          developer: meta.developer || "",
+          scope: meta.scope || "",
+          note: meta.note || "",
+          submittedAt: new Date().toISOString(),
+        });
+        continue;
+      }
+
+      const newStatus = buildAutoTimelineStatus(oldRow, newPercent, meta.date, meta.settings);
+
+      ranges.push({
+        range: `${quoteSheet(project.sheetName)}!H${rowNumber}`,
+        values: [[formatPercentForSheet(newPercent)]],
+      });
+      ranges.push({
+        range: `${quoteSheet(project.sheetName)}!K${rowNumber}`,
+        values: [[newStatus]],
+      });
+      updatedRowNumbers.push(rowNumber);
+
+      auditLog.push({
+        project: project.key,
+        projectLabel: project.label,
+        rowNumber,
+        task: cleanSheetCellValue(oldRow[3]),
+        oldPercent: cleanSheetCellValue(oldRow[7]),
+        newPercent,
+        oldStatus: cleanSheetCellValue(oldRow[10]),
+        newStatus,
+        developer: meta.developer || "",
+        scope: meta.scope || "",
+        note: meta.note || "",
+        submittedAt: new Date().toISOString(),
+      });
+    }
 
     if (ranges.length > 0) {
       await batchUpdateValueRanges(sheets, project.spreadsheetId, ranges);
@@ -1037,19 +1197,22 @@ async function applySubmittedProgressPercents(sheets, progressItems) {
       key: project.key,
       label: project.label,
       editedCells: ranges.length,
-      rowNumbers: [...rows.keys()],
+      rowNumbers: updatedRowNumbers,
     });
   }
 
   const editedCells = projects.reduce((total, project) => total + project.editedCells, 0);
-  if (editedCells === 0) return null;
+  const conflicts = auditLog.filter((item) => item.conflict);
+  if (editedCells === 0 && conflicts.length === 0) return null;
 
   return {
     type: "direct_progress_percent_update",
-    ok: true,
-    field: "Percent",
+    ok: conflicts.length === 0,
+    field: "Percent, Status&LateDay",
     editedCells,
+    conflicts,
     projects,
+    auditLog,
   };
 }
 
@@ -1057,11 +1220,113 @@ function formatPercentForSheet(value) {
   return clampPercent(value) / 100;
 }
 
+function buildAutoTimelineStatus(row, percent, reviewDate = todayBangkok(), settings = defaultAppSettings()) {
+  if (percent >= 100) return "Done";
+
+  const blockers = cleanSheetCellValue(row[6]);
+  if (blockers && !/^0+$|^none$|^no$/i.test(blockers)) return "Blocked";
+
+  const endDates = [...possibleSheetDates(row[5])];
+  const reviewTime = dateToBangkokTime(reviewDate);
+  const endTimes = endDates.map(dateToBangkokTime).filter((time) => Number.isFinite(time));
+  const overdueTimes = endTimes.filter((time) => time < reviewTime);
+  if (overdueTimes.length > 0) {
+    const latestOverdue = Math.max(...overdueTimes);
+    const lateDays = Math.max(1, Math.ceil((reviewTime - latestOverdue) / (24 * 60 * 60 * 1000)));
+    return `Late ${lateDays} day${lateDays === 1 ? "" : "s"}`;
+  }
+
+  const soonTime = reviewTime + settings.dueSoonDays * 24 * 60 * 60 * 1000;
+  if (endTimes.some((time) => time >= reviewTime && time <= soonTime)) return "Due Soon";
+
+  return "In Progress";
+}
+
+function buildProgressSubmitReply(action) {
+  if (!action) return "No timeline rows were updated. Select tasks with row numbers before submitting.";
+
+  const updatedRows = action.projects?.reduce((total, project) => total + (project.rowNumbers?.length || 0), 0) || 0;
+  const conflictCount = action.conflicts?.length || 0;
+  const updatedText = updatedRows
+    ? `Updated ${updatedRows} timeline row(s) and ${action.editedCells} cell(s).`
+    : "No timeline rows were updated.";
+  const conflictText = conflictCount
+    ? ` ${conflictCount} row(s) were skipped because the Sheet percent changed after this board was loaded.`
+    : "";
+  return `${updatedText}${conflictText}`;
+}
+
+async function syncTimelineStatuses(projectKey = "") {
+  validateSheetRuntimeConfig();
+  const sheets = await getSheetsClient();
+  const settings = await loadAppSettings(sheets);
+  const projects = projectKey ? [resolveProject(projectKey)] : Object.values(PROJECTS);
+  const results = [];
+  const auditLog = [];
+  const today = todayBangkok();
+
+  for (const project of projects) {
+    await ensureHeader(sheets, project, project.sheetName, TIMELINE_HEADERS);
+    const rows = await readRows(sheets, project, project.sheetName, "A:K");
+    const ranges = [];
+
+    rows.slice(1).forEach((row, index) => {
+      if (!isMeaningfulTimelineRow(row)) return;
+      const rowNumber = index + 2;
+      const percent = clampPercent(row[7]);
+      const newStatus = buildAutoTimelineStatus(row, percent, today, settings);
+      const oldStatus = cleanSheetCellValue(row[10]);
+      if (oldStatus === newStatus) return;
+
+      ranges.push({
+        range: `${quoteSheet(project.sheetName)}!K${rowNumber}`,
+        values: [[newStatus]],
+      });
+      auditLog.push({
+        project: project.key,
+        projectLabel: project.label,
+        rowNumber,
+        task: cleanSheetCellValue(row[3]),
+        percent,
+        oldStatus,
+        newStatus,
+        syncedAt: new Date().toISOString(),
+      });
+    });
+
+    if (ranges.length > 0) {
+      await batchUpdateValueRanges(sheets, project.spreadsheetId, ranges);
+    }
+
+    results.push({
+      project: project.label,
+      updatedRows: ranges.length,
+    });
+  }
+
+  const result = {
+    ok: true,
+    date: today,
+    updatedRows: results.reduce((total, item) => total + item.updatedRows, 0),
+    projects: results,
+    auditLog,
+  };
+
+  await saveGeneratedResultToDatabase(
+    "status-sync",
+    `${today}:${Date.now()}`,
+    result,
+  );
+
+  return result;
+}
+
 async function createWeeklyTaskBoard(weekStart = currentWeekStartBangkok()) {
   validateSheetRuntimeConfig();
 
   const normalizedWeekStart = normalizeWeekStart(weekStart);
   const sheets = await getSheetsClient();
+  const settings = await loadAppSettings(sheets);
   const contexts = [];
 
   for (const project of Object.values(PROJECTS)) {
@@ -1074,7 +1339,7 @@ async function createWeeklyTaskBoard(weekStart = currentWeekStartBangkok()) {
     ));
   }
 
-  const people = buildRuleBasedWeeklyTaskPeople(contexts, normalizedWeekStart);
+  const people = buildRuleBasedWeeklyTaskPeople(contexts, normalizedWeekStart, settings);
 
   const result = {
     ok: true,
@@ -1095,6 +1360,111 @@ async function createWeeklyTaskBoard(weekStart = currentWeekStartBangkok()) {
   weeklyTaskCache.set(normalizedWeekStart, result);
   await saveGeneratedResultToDatabase("weekly-tasks", normalizedWeekStart, result);
   return result;
+}
+
+async function createRulePreview(date = todayBangkok(), scope = "daily") {
+  validateSheetRuntimeConfig();
+  const sheets = await getSheetsClient();
+  const reviewDate = normalizeDate(date);
+  const mode = scope === "weekly" ? TIMELINE_CONTEXT_MODE.WEEKLY : TIMELINE_CONTEXT_MODE.DAILY;
+  const weekStart = normalizeWeekStart(reviewDate);
+  const startDate = mode === TIMELINE_CONTEXT_MODE.WEEKLY ? weekStart : reviewDate;
+  const endDate = mode === TIMELINE_CONTEXT_MODE.WEEKLY ? weekEndFromStart(weekStart) : addDaysToDate(reviewDate, 1);
+  const rows = [];
+
+  for (const project of Object.values(PROJECTS)) {
+    const timelineRows = await readRowsRaw(sheets, project, project.sheetName, "A:K");
+    const timelineHeaders = normalizeTimelineHeaders(timelineRows[0] || TIMELINE_HEADERS);
+    const meaningfulRows = timelineRows
+      .slice(1)
+      .map((row, index) => ({ row, rowNumber: index + 2 }))
+      .filter((item) => isMeaningfulSheetRow(item.row));
+
+    for (const item of meaningfulRows) {
+      const objectRow = sheetRowToObject(timelineHeaders, item.row, item.rowNumber);
+      rows.push(explainTimelineRule(project, objectRow, {
+        mode,
+        reviewDate,
+        startDate,
+        endDate,
+      }));
+    }
+  }
+
+  const included = rows.filter((row) => row.included);
+  const skipped = rows.filter((row) => !row.included);
+
+  return {
+    ok: true,
+    scope: mode,
+    date: reviewDate,
+    weekStart,
+    startDate,
+    endDate,
+    summary: {
+      totalRows: rows.length,
+      included: included.length,
+      skipped: skipped.length,
+      overdue: included.filter((row) => row.reasonCode === "overdue").length,
+      inWindow: included.filter((row) => row.reasonCode === "in_window").length,
+      complete: skipped.filter((row) => row.reasonCode === "complete").length,
+      noDates: skipped.filter((row) => row.reasonCode === "no_dates").length,
+      future: skipped.filter((row) => row.reasonCode === "outside_window").length,
+    },
+    included: included.slice(0, 80),
+    skipped: skipped.slice(0, 80),
+    tokenUsage: null,
+  };
+}
+
+function explainTimelineRule(project, row, options) {
+  const schedule = getTimelineRowScheduleInfo(row);
+  const reviewTime = dateToBangkokTime(options.reviewDate);
+  const startTime = dateToBangkokTime(options.startDate);
+  const endTime = dateToBangkokTime(options.endDate);
+  const inWindow = schedule.allTimes.some((time) => time >= startTime && time <= endTime);
+  const isOverdue = schedule.endTimes.some((time) => time < reviewTime);
+  const owner = resolveTaskOwner(compactTimelineRow(row), project.key);
+
+  let included = false;
+  let reasonCode = "outside_window";
+  let reason = `Skipped: outside ${options.startDate} to ${options.endDate}.`;
+
+  if (schedule.isComplete) {
+    reasonCode = "complete";
+    reason = "Skipped: Percent is 100 or status is complete.";
+  } else if (schedule.allTimes.length === 0) {
+    reasonCode = "no_dates";
+    reason = "Skipped: Start/End has no parseable date.";
+  } else if (isOverdue) {
+    included = true;
+    reasonCode = "overdue";
+    reason = "Included: unfinished and End date is before review date.";
+  } else if (inWindow) {
+    included = true;
+    reasonCode = "in_window";
+    reason = options.mode === TIMELINE_CONTEXT_MODE.WEEKLY
+      ? "Included: unfinished and Start/End is inside this week."
+      : "Included: unfinished and Start/End is today or tomorrow.";
+  }
+
+  return {
+    included,
+    reasonCode,
+    reason,
+    project: project.key,
+    projectLabel: project.label,
+    rowNumber: row.rowNumber || "",
+    owner,
+    task: cleanSheetCellValue(row.task),
+    rock: cleanSheetCellValue(row.rock),
+    percent: schedule.percent,
+    status: cleanSheetCellValue(row.statusLateDay || row.status),
+    rawStart: cleanSheetCellValue(row.start),
+    rawEnd: cleanSheetCellValue(row.end),
+    parsedStart: schedule.startDates,
+    parsedEnd: schedule.endDates,
+  };
 }
 
 async function createMilestoneReview(date = todayBangkok()) {
@@ -1140,6 +1510,210 @@ async function createMilestoneReview(date = todayBangkok()) {
   milestoneReviewCache.set(date, result);
   await saveGeneratedResultToDatabase("milestone-review", date, result);
   return result;
+}
+
+async function createRuleBasedDashboard(date = todayBangkok()) {
+  validateSheetRuntimeConfig();
+
+  const sheets = await getSheetsClient();
+  const reviewDate = normalizeDate(date);
+  const weekStart = normalizeWeekStart(reviewDate);
+  const settings = await loadAppSettings(sheets);
+  const contexts = [];
+
+  for (const project of Object.values(PROJECTS)) {
+    contexts.push(await buildFullDailyTaskContext(
+      sheets,
+      project,
+      weekStart,
+      reviewDate,
+      TIMELINE_CONTEXT_MODE.MILESTONE,
+    ));
+  }
+
+  const projects = contexts.map((context) => buildDashboardProjectSummary(context, reviewDate, settings));
+  const totals = projects.reduce((sum, project) => ({
+    rows: sum.rows + project.rows,
+    done: sum.done + project.done,
+    active: sum.active + project.active,
+    overdue: sum.overdue + project.overdue,
+    dueSoon: sum.dueSoon + project.dueSoon,
+    blocked: sum.blocked + project.blocked,
+    lowProgressDeadline: sum.lowProgressDeadline + project.lowProgressDeadline,
+  }), { rows: 0, done: 0, active: 0, overdue: 0, dueSoon: 0, blocked: 0, lowProgressDeadline: 0 });
+
+  const ownerWorkload = mergeDashboardCounts(projects.flatMap((project) => project.ownerWorkload), "owner");
+  const rockProgress = projects.flatMap((project) => project.rockProgress);
+  const topRisks = projects
+    .flatMap((project) => project.topRisks)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 12);
+
+  return {
+    ok: true,
+    date: reviewDate,
+    generatedAt: new Date().toISOString(),
+    settings: publicSettingsSummary(settings),
+    totals,
+    projects,
+    ownerWorkload,
+    rockProgress,
+    topRisks,
+    tokenUsage: null,
+  };
+}
+
+function buildDashboardProjectSummary(context, reviewDate, settings = defaultAppSettings()) {
+  const rows = (context.fullTimeline || [])
+    .map(compactTimelineArrayToObject)
+    .filter((row) => cleanSheetCellValue(row.task));
+  const analyzed = rows.map((row) => analyzeDashboardRow(context, row, reviewDate, settings));
+  const active = analyzed.filter((item) => !item.done);
+  const done = analyzed.filter((item) => item.done);
+  const blocked = active.filter((item) => item.blocked);
+  const overdue = active.filter((item) => item.overdue);
+  const dueSoon = active.filter((item) => item.dueSoon);
+  const lowProgressDeadline = active.filter((item) => item.lowProgressDeadline);
+  const progressValues = analyzed.map((item) => item.percent);
+  const averageProgress = progressValues.length
+    ? Math.round(progressValues.reduce((sum, value) => sum + value, 0) / progressValues.length)
+    : 0;
+
+  return {
+    projectKey: context.projectKey,
+    project: context.project,
+    rows: analyzed.length,
+    active: active.length,
+    done: done.length,
+    blocked: blocked.length,
+    overdue: overdue.length,
+    dueSoon: dueSoon.length,
+    lowProgressDeadline: lowProgressDeadline.length,
+    averageProgress,
+    ownerWorkload: dashboardOwnerWorkload(active),
+    rockProgress: dashboardRockProgress(context, analyzed),
+    topRisks: dashboardTopRisks(analyzed),
+  };
+}
+
+function analyzeDashboardRow(context, row, reviewDate, settings = defaultAppSettings()) {
+  const schedule = getTimelineRowScheduleInfo(row);
+  const reviewTime = dateToBangkokTime(reviewDate);
+  const soonTime = reviewTime + settings.dueSoonDays * 24 * 60 * 60 * 1000;
+  const percent = clampPercent(row.pct);
+  const blocked = Boolean(cleanSheetCellValue(row.blk));
+  const done = percent >= 100 || /done|complete|finished|closed|เสร็จ|ปิดงาน/i.test(cleanSheetCellValue(row.status));
+  const overdue = !done && schedule.endTimes.some((time) => time < reviewTime);
+  const dueSoon = !done && schedule.endTimes.some((time) => time >= reviewTime && time <= soonTime);
+  const lowProgressDeadline = !done && (overdue || dueSoon) && percent < 80;
+
+  return {
+    projectKey: context.projectKey,
+    project: context.project,
+    rowNumber: Number(row.rowNumber),
+    rock: cleanSheetCellValue(row.rock) || "No Rock",
+    task: cleanSheetCellValue(row.task),
+    owner: resolveTaskOwner(row, context.projectKey, settings),
+    percent,
+    blocked,
+    done,
+    overdue,
+    dueSoon,
+    lowProgressDeadline,
+    status: cleanSheetCellValue(row.status),
+    blockers: cleanSheetCellValue(row.blk),
+    end: cleanSheetCellValue(row.end),
+  };
+}
+
+function dashboardOwnerWorkload(rows) {
+  const byOwner = new Map();
+  for (const row of rows) {
+    const item = byOwner.get(row.owner) || {
+      owner: row.owner,
+      active: 0,
+      overdue: 0,
+      dueSoon: 0,
+      blocked: 0,
+      averageProgress: 0,
+      _progressTotal: 0,
+    };
+    item.active += 1;
+    item.overdue += row.overdue ? 1 : 0;
+    item.dueSoon += row.dueSoon ? 1 : 0;
+    item.blocked += row.blocked ? 1 : 0;
+    item._progressTotal += row.percent;
+    item.averageProgress = Math.round(item._progressTotal / item.active);
+    byOwner.set(row.owner, item);
+  }
+
+  return [...byOwner.values()]
+    .map(({ _progressTotal, ...item }) => item)
+    .sort((a, b) => b.overdue - a.overdue || b.blocked - a.blocked || b.active - a.active);
+}
+
+function dashboardRockProgress(context, rows) {
+  const byRock = new Map();
+  for (const row of rows) {
+    const item = byRock.get(row.rock) || {
+      project: context.project,
+      projectKey: context.projectKey,
+      rock: row.rock,
+      rows: 0,
+      done: 0,
+      overdue: 0,
+      blocked: 0,
+      averageProgress: 0,
+      _progressTotal: 0,
+    };
+    item.rows += 1;
+    item.done += row.done ? 1 : 0;
+    item.overdue += row.overdue ? 1 : 0;
+    item.blocked += row.blocked ? 1 : 0;
+    item._progressTotal += row.percent;
+    item.averageProgress = Math.round(item._progressTotal / item.rows);
+    byRock.set(row.rock, item);
+  }
+
+  return [...byRock.values()]
+    .map(({ _progressTotal, ...item }) => item)
+    .sort((a, b) => b.overdue - a.overdue || b.blocked - a.blocked || a.averageProgress - b.averageProgress)
+    .slice(0, 12);
+}
+
+function dashboardTopRisks(rows) {
+  return rows
+    .filter((row) => row.overdue || row.blocked || row.lowProgressDeadline || row.dueSoon)
+    .map((row) => ({
+      ...row,
+      score:
+        (row.overdue ? 100 : 0)
+        + (row.blocked ? 80 : 0)
+        + (row.lowProgressDeadline ? 50 : 0)
+        + (row.dueSoon ? 25 : 0)
+        + (100 - row.percent),
+    }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 10);
+}
+
+function mergeDashboardCounts(items, key) {
+  const merged = new Map();
+  for (const item of items) {
+    const id = item[key] || "Unknown";
+    const current = merged.get(id) || { ...item, active: 0, overdue: 0, dueSoon: 0, blocked: 0, averageProgress: 0, _progressTotal: 0 };
+    current.active += item.active || 0;
+    current.overdue += item.overdue || 0;
+    current.dueSoon += item.dueSoon || 0;
+    current.blocked += item.blocked || 0;
+    current._progressTotal += (item.averageProgress || 0) * (item.active || 0);
+    current.averageProgress = current.active ? Math.round(current._progressTotal / current.active) : 0;
+    merged.set(id, current);
+  }
+
+  return [...merged.values()]
+    .map(({ _progressTotal, ...item }) => item)
+    .sort((a, b) => b.overdue - a.overdue || b.blocked - a.blocked || b.active - a.active);
 }
 
 async function executeAssistantActions(actions, options = {}) {
@@ -2536,6 +3110,257 @@ async function readDatabaseRows(sheets, project) {
   return response.data.values || [];
 }
 
+async function loadAppSettings(sheets) {
+  const project = getDatabaseProject();
+  await ensureHeader(sheets, project, SETTINGS_SHEET_NAME, SETTINGS_HEADERS);
+  await seedDefaultSettings(sheets, project);
+
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: project.spreadsheetId,
+    range: `${quoteSheet(SETTINGS_SHEET_NAME)}!A:C`,
+  });
+  const rows = response.data.values || [];
+  const values = new Map(
+    rows.slice(1)
+      .map((row) => [cleanSheetCellValue(row[0]), cleanSheetCellValue(row[1])])
+      .filter(([key]) => key),
+  );
+
+  return {
+    dueSoonDays: positiveNumberSetting(values, "dueSoonDays", DEFAULT_DUE_SOON_DAYS),
+    databaseCacheRetentionDays: positiveNumberSetting(values, "databaseCacheRetentionDays", DATABASE_CACHE_RETENTION_DAYS),
+    databaseAuditRetentionDays: positiveNumberSetting(values, "databaseAuditRetentionDays", DATABASE_AUDIT_RETENTION_DAYS),
+    ownerAliasRules: mergeOwnerAliasRules(values),
+  };
+}
+
+async function seedDefaultSettings(sheets, project) {
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: project.spreadsheetId,
+    range: `${quoteSheet(SETTINGS_SHEET_NAME)}!A:C`,
+  });
+  const rows = response.data.values || [];
+  const existingKeys = new Set(rows.slice(1).map((row) => cleanSheetCellValue(row[0])).filter(Boolean));
+  const values = defaultSettingsRows().filter((row) => !existingKeys.has(row[0]));
+  if (values.length === 0) return;
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: project.spreadsheetId,
+    range: `${quoteSheet(SETTINGS_SHEET_NAME)}!A:C`,
+    valueInputOption: "USER_ENTERED",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: { values },
+  });
+}
+
+function defaultSettingsRows() {
+  return [
+    ["dueSoonDays", String(DEFAULT_DUE_SOON_DAYS), "Rows with End within this many days are Due Soon."],
+    ["databaseCacheRetentionDays", String(DATABASE_CACHE_RETENTION_DAYS), "Daily/Weekly/Milestone cache retention."],
+    ["databaseAuditRetentionDays", String(DATABASE_AUDIT_RETENTION_DAYS), "Submit/status audit retention."],
+    ...OWNER_ALIAS_RULES.map((rule) => [
+      `ownerAliases.${rule.name}`,
+      rule.aliases.join(", "),
+      "Comma-separated owner aliases and keywords.",
+    ]),
+  ];
+}
+
+function positiveNumberSetting(values, key, fallback) {
+  const value = Number(values.get(key));
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function mergeOwnerAliasRules(values) {
+  return OWNER_ALIAS_RULES.map((rule) => {
+    const setting = values.get(`ownerAliases.${rule.name}`);
+    const aliases = setting
+      ? setting.split(",").map((item) => item.trim()).filter(Boolean)
+      : rule.aliases;
+    return { ...rule, aliases };
+  });
+}
+
+function defaultAppSettings() {
+  return {
+    dueSoonDays: DEFAULT_DUE_SOON_DAYS,
+    databaseCacheRetentionDays: DATABASE_CACHE_RETENTION_DAYS,
+    databaseAuditRetentionDays: DATABASE_AUDIT_RETENTION_DAYS,
+    ownerAliasRules: OWNER_ALIAS_RULES,
+  };
+}
+
+function publicSettingsSummary(settings) {
+  return {
+    dueSoonDays: settings.dueSoonDays,
+    databaseCacheRetentionDays: settings.databaseCacheRetentionDays,
+    databaseAuditRetentionDays: settings.databaseAuditRetentionDays,
+    ownerAliasRuleCount: settings.ownerAliasRules.length,
+  };
+}
+
+async function getSettingsForUi() {
+  validateSheetRuntimeConfig();
+  const sheets = await getSheetsClient();
+  const project = getDatabaseProject();
+  await ensureHeader(sheets, project, SETTINGS_SHEET_NAME, SETTINGS_HEADERS);
+  await seedDefaultSettings(sheets, project);
+  const rows = await readSettingsRows(sheets, project);
+
+  return {
+    ok: true,
+    project: project.key,
+    sheet: SETTINGS_SHEET_NAME,
+    parsed: publicSettingsSummary(await loadAppSettings(sheets)),
+    settings: rows.slice(1).map((row) => ({
+      key: cleanSheetCellValue(row[0]),
+      value: cleanSheetCellValue(row[1]),
+      notes: cleanSheetCellValue(row[2]),
+    })).filter((row) => row.key),
+  };
+}
+
+async function saveSettingsFromUi(body) {
+  validateSheetRuntimeConfig();
+  const settings = Array.isArray(body?.settings) ? body.settings : [];
+  const cleanSettings = settings
+    .map((item) => ({
+      key: cleanSheetCellValue(item.key),
+      value: cleanSheetCellValue(item.value),
+      notes: cleanSheetCellValue(item.notes),
+    }))
+    .filter((item) => item.key);
+
+  if (cleanSettings.length === 0) {
+    const error = new Error("No settings provided");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const sheets = await getSheetsClient();
+  const project = getDatabaseProject();
+  await ensureHeader(sheets, project, SETTINGS_SHEET_NAME, SETTINGS_HEADERS);
+  const values = cleanSettings.map((item) => [item.key, item.value, item.notes]);
+
+  await sheets.spreadsheets.values.clear({
+    spreadsheetId: project.spreadsheetId,
+    range: `${quoteSheet(SETTINGS_SHEET_NAME)}!A2:C`,
+  });
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: project.spreadsheetId,
+    range: `${quoteSheet(SETTINGS_SHEET_NAME)}!A2:C${values.length + 1}`,
+    valueInputOption: "USER_ENTERED",
+    requestBody: { values },
+  });
+
+  return getSettingsForUi();
+}
+
+async function readSettingsRows(sheets, project) {
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: project.spreadsheetId,
+    range: `${quoteSheet(SETTINGS_SHEET_NAME)}!A:C`,
+  });
+  return response.data.values || [];
+}
+
+async function cleanupDatabase(options = {}) {
+  validateSheetRuntimeConfig();
+  const sheets = await getSheetsClient();
+  const settings = await loadAppSettings(sheets);
+  const project = getDatabaseProject();
+  await ensureHeader(sheets, project, DATABASE_SHEET_NAME, DATABASE_HEADERS);
+
+  const rows = await readDatabaseRows(sheets, project);
+  const sheetId = await getSheetId(sheets, project, DATABASE_SHEET_NAME);
+  const cacheRetentionDays = Number(options.cacheRetentionDays || settings.databaseCacheRetentionDays);
+  const auditRetentionDays = Number(options.auditRetentionDays || settings.databaseAuditRetentionDays);
+  const now = Date.now();
+  const deleteRows = [];
+
+  rows.forEach((row, index) => {
+    const rowNumber = index + 1;
+    if (rowNumber === 1) return;
+    const type = cleanSheetCellValue(row[0]);
+    const key = cleanSheetCellValue(row[1]);
+    const payload = cleanSheetCellValue(row[3]);
+    const updatedAt = cleanSheetCellValue(row[4]);
+
+    if (!type && !key && !payload) {
+      deleteRows.push(rowNumber);
+      return;
+    }
+
+    const retentionDays = isAuditDatabaseType(type) ? auditRetentionDays : cacheRetentionDays;
+    const ageTime = databaseRowTime(row[2], updatedAt);
+    if (Number.isFinite(ageTime) && now - ageTime > retentionDays * 24 * 60 * 60 * 1000) {
+      deleteRows.push(rowNumber);
+    }
+  });
+
+  await deleteSheetRows(sheets, project.spreadsheetId, sheetId, deleteRows);
+
+  return {
+    ok: true,
+    sheet: DATABASE_SHEET_NAME,
+    project: project.key,
+    scannedRows: Math.max(0, rows.length - 1),
+    deletedRows: deleteRows.length,
+    cacheRetentionDays,
+    auditRetentionDays,
+  };
+}
+
+function isAuditDatabaseType(type) {
+  return ["progress-audit", "status-sync", "daily-task-submit"].includes(cleanSheetCellValue(type));
+}
+
+function databaseRowTime(dateValue, updatedAtValue) {
+  const candidates = [updatedAtValue, dateValue].map(cleanSheetCellValue).filter(Boolean);
+  for (const candidate of candidates) {
+    const parsed = new Date(candidate);
+    if (!Number.isNaN(parsed.getTime())) return parsed.getTime();
+    const dates = [...possibleSheetDates(candidate)];
+    if (dates.length) return dateToBangkokTime(dates[0]);
+  }
+  return NaN;
+}
+
+async function getSheetId(sheets, project, sheetName) {
+  const spreadsheet = await sheets.spreadsheets.get({
+    spreadsheetId: project.spreadsheetId,
+    fields: "sheets.properties(sheetId,title)",
+  });
+  const found = spreadsheet.data.sheets?.find((sheet) => sheet.properties?.title === sheetName);
+  if (!found) {
+    const error = new Error(`Sheet not found: ${sheetName}`);
+    error.statusCode = 500;
+    throw error;
+  }
+  return found.properties.sheetId;
+}
+
+async function deleteSheetRows(sheets, spreadsheetId, sheetId, rowNumbers) {
+  const ranges = contiguousRowRanges(rowNumbers)
+    .sort((a, b) => b.start - a.start)
+    .map((range) => ({
+      deleteDimension: {
+        range: {
+          sheetId,
+          dimension: "ROWS",
+          startIndex: range.start - 1,
+          endIndex: range.end,
+        },
+      },
+    }));
+  if (ranges.length === 0) return;
+
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: { requests: ranges },
+  });
+}
+
 function chunkText(value, size) {
   const text = String(value || "");
   const chunks = [];
@@ -2708,12 +3533,16 @@ function buildTimelineFilterSummary(mode, reviewDate, weekStart) {
 
 function getTimelineRowScheduleInfo(row) {
   const fields = row.fields || {};
-  const startTimes = [fields.Start, row.start]
+  const startDates = [fields.Start, row.start]
     .flatMap((value) => [...possibleSheetDates(value)])
+    .filter(Boolean);
+  const endDates = [fields.End, row.end]
+    .flatMap((value) => [...possibleSheetDates(value)])
+    .filter(Boolean);
+  const startTimes = startDates
     .map(dateToBangkokTime)
     .filter((time) => Number.isFinite(time));
-  const endTimes = [fields.End, row.end]
-    .flatMap((value) => [...possibleSheetDates(value)])
+  const endTimes = endDates
     .map(dateToBangkokTime)
     .filter((time) => Number.isFinite(time));
   const allTimes = [...startTimes, ...endTimes];
@@ -2729,6 +3558,8 @@ function getTimelineRowScheduleInfo(row) {
   ].map(cleanSheetCellValue).join(" ").toLowerCase();
 
   return {
+    startDates: [...new Set(startDates)],
+    endDates: [...new Set(endDates)],
     startTimes,
     endTimes,
     allTimes,
@@ -3575,15 +4406,51 @@ function normalizeProjectKey(value) {
   return "";
 }
 
-function normalizePersonName(value) {
+function normalizePersonName(value, settings = defaultAppSettings()) {
   const input = String(value || "").trim();
   if (!input) return "Unknown";
-  const lower = input.toLowerCase();
-  const found = ACTIVE_TEAM_MEMBERS.find((member) => {
-    const name = member.name.toLowerCase();
-    return lower === name || lower.includes(name);
-  });
-  return found ? found.name : input;
+  const direct = matchOwnerAlias(input, settings);
+  if (direct) return direct;
+  return input;
+}
+
+function matchOwnerAlias(value, settings = defaultAppSettings()) {
+  const normalized = normalizeOwnerText(value);
+  if (!normalized) return "";
+
+  for (const member of ACTIVE_TEAM_MEMBERS) {
+    const name = normalizeOwnerText(member.name);
+    if (normalized === name || normalized.includes(name)) return member.name;
+  }
+
+  for (const rule of settings.ownerAliasRules) {
+    if (rule.aliases.some((alias) => ownerTextHasAlias(normalized, alias))) {
+      return rule.name;
+    }
+  }
+
+  return "";
+}
+
+function normalizeOwnerText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[_/|,;:()[\]{}]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function ownerTextHasAlias(text, alias) {
+  const normalizedAlias = normalizeOwnerText(alias);
+  if (!normalizedAlias) return false;
+  if (/^[a-z0-9 ]+$/.test(normalizedAlias)) {
+    return new RegExp(`(^|\\s)${escapeRegExp(normalizedAlias)}($|\\s)`, "i").test(text);
+  }
+  return text.includes(normalizedAlias);
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function parseDiscordArgs(value) {
@@ -3673,6 +4540,7 @@ function createAdminStatus(req) {
         database: {
           project: getDatabaseProject().key,
           tab: DATABASE_SHEET_NAME,
+          settingsTab: SETTINGS_SHEET_NAME,
         },
       },
     },
@@ -3688,6 +4556,8 @@ function createAdminStatus(req) {
     },
     endpoints: {
       health: "/health",
+      dashboard: "/dashboard",
+      settings: "/settings",
       updates: "/updates",
       feedback: "/feedback",
       weeklyTarget: "/weekly-target",
@@ -3695,7 +4565,10 @@ function createAdminStatus(req) {
       dailyTasks: "/daily-tasks",
       dailyTaskSubmit: "/daily-task-submit",
       weeklyTasks: "/weekly-tasks",
+      rulePreview: "/rule-preview",
       milestoneReview: "/milestone-review",
+      syncStatus: "/sync-status",
+      databaseCleanup: "/database/cleanup",
       timelineAnalysis: "/timeline-analysis",
       registerCommands: "/discord/register-commands",
       testReport: "/discord/test-report",
@@ -3892,12 +4765,12 @@ function normalizePlanTask(task) {
   };
 }
 
-function buildRuleBasedDailyTaskPeople(contexts, date) {
+function buildRuleBasedDailyTaskPeople(contexts, date, settings = defaultAppSettings()) {
   const people = createEmptyDailyTaskPeople();
 
   for (const context of contexts) {
     for (const row of context.fullTimeline || []) {
-      const task = timelineContextRowToTask(context, row, date, "daily");
+      const task = timelineContextRowToTask(context, row, date, "daily", settings);
       if (!task) continue;
 
       const person = people.get(task.owner) || people.get("\u0e17\u0e35\u0e19");
@@ -3909,12 +4782,12 @@ function buildRuleBasedDailyTaskPeople(contexts, date) {
   return [...people.values()];
 }
 
-function buildRuleBasedWeeklyTaskPeople(contexts, weekStart) {
+function buildRuleBasedWeeklyTaskPeople(contexts, weekStart, settings = defaultAppSettings()) {
   const people = createEmptyWeeklyTaskPeople();
 
   for (const context of contexts) {
     for (const row of context.fullTimeline || []) {
-      const task = timelineContextRowToTask(context, row, weekStart, "weekly");
+      const task = timelineContextRowToTask(context, row, weekStart, "weekly", settings);
       if (!task) continue;
 
       const person = people.get(task.owner) || people.get("\u0e17\u0e35\u0e19");
@@ -3950,13 +4823,13 @@ function createEmptyWeeklyTaskPeople() {
   }]));
 }
 
-function timelineContextRowToTask(context, sourceRow, reviewDate, scope) {
+function timelineContextRowToTask(context, sourceRow, reviewDate, scope, settings = defaultAppSettings()) {
   const row = compactTimelineArrayToObject(sourceRow);
   const title = cleanSheetCellValue(row.task);
   if (!title) return null;
 
   const schedule = getTimelineRowScheduleInfo(row);
-  const owner = resolveTaskOwner(row);
+  const owner = resolveTaskOwner(row, context.projectKey, settings);
   const currentPercent = clampPercent(row.pct);
   const isOverdue = schedule.endTimes.some((time) => time < dateToBangkokTime(reviewDate));
   const dateReason = formatTaskDateReason(row, isOverdue, scope);
@@ -3986,20 +4859,42 @@ function stripTaskOwner(task) {
   return cleanTask;
 }
 
-function resolveTaskOwner(row) {
-  const candidates = [
-    row.resp,
-    row.sub,
-    row.status,
-    row.task,
-  ].map(cleanSheetCellValue).filter(Boolean);
+function resolveTaskOwner(row, projectKey = "", settings = defaultAppSettings()) {
+  const weightedTexts = [
+    [row.resp, 6],
+    [row.sub, 4],
+    [row.status, 2],
+    [row.rock, 2],
+    [row.task, 3],
+    [row.blk, 1],
+  ];
 
-  for (const candidate of candidates) {
-    const name = normalizePersonName(candidate);
-    if (ACTIVE_TEAM_MEMBERS.some((member) => member.name === name)) return name;
+  const scores = new Map(ACTIVE_TEAM_MEMBERS.map((member) => [member.name, 0]));
+  for (const [value, weight] of weightedTexts) {
+    const text = normalizeOwnerText(value);
+    if (!text) continue;
+
+    const direct = matchOwnerAlias(text, settings);
+    if (direct) {
+      scores.set(direct, (scores.get(direct) || 0) + weight * 3);
+    }
+
+    for (const rule of settings.ownerAliasRules) {
+      const matchedAliases = rule.aliases.filter((alias) => ownerTextHasAlias(text, alias)).length;
+      if (matchedAliases > 0) {
+        scores.set(rule.name, (scores.get(rule.name) || 0) + matchedAliases * weight);
+      }
+    }
   }
 
-  return "\u0e17\u0e35\u0e19";
+  if (projectKey === "eaa") {
+    scores.set("\u0e19\u0e19", (scores.get("\u0e19\u0e19") || 0) + 1);
+  } else if (projectKey === "dynozoic") {
+    scores.set("\u0e20\u0e39\u0e1c\u0e32", (scores.get("\u0e20\u0e39\u0e1c\u0e32") || 0) + 1);
+  }
+
+  const best = [...scores.entries()].sort((a, b) => b[1] - a[1])[0];
+  return best && best[1] > 0 ? best[0] : "\u0e17\u0e35\u0e19";
 }
 
 function formatTaskDateReason(row, isOverdue, scope) {
@@ -4199,13 +5094,16 @@ function normalizeDailyProgressItems(items) {
       const title = String(item.title || item.task || "").trim();
       const project = normalizeProjectKey(item.project || item.game);
       const percent = clampPercent(item.percent ?? item.currentPercent ?? item.donePercent);
+      const originalPercent = item.originalPercent === undefined || item.originalPercent === ""
+        ? null
+        : clampPercent(item.originalPercent);
       const timelineRowNumber = normalizeOptionalRowNumber(item.timelineRowNumber || item.rowNumber || item.row);
       const status = String(item.status || "").trim();
       const note = String(item.note || item.comment || "").trim();
       const rock = String(item.rock || item.milestone || item.group || "").trim();
 
       if (!title && !note) return null;
-      return { title, project, rock, percent, timelineRowNumber, status, note };
+      return { title, project, rock, percent, originalPercent, timelineRowNumber, status, note };
     })
     .filter(Boolean);
 }

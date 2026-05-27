@@ -25,21 +25,48 @@
       <section class="status-grid" id="statusGrid" aria-live="polite"></section>
 
       <nav class="tabs" aria-label="Dashboard sections">
-        <button class="tab is-active" type="button" data-panel="dailyTasksPanel">Daily Tasks</button>
+        <button class="tab is-active" type="button" data-panel="dashboardPanel">Dashboard</button>
+        <button class="tab" type="button" data-panel="dailyTasksPanel">Daily Tasks</button>
         <button class="tab" type="button" data-panel="workPanel">Update</button>
         <button class="tab" type="button" data-panel="chatPanel">AI Chat</button>
         <button class="tab" type="button" data-panel="feedbackPanel">Feedback</button>
         <button class="tab" type="button" data-panel="planningPanel">Plan</button>
         <button class="tab" type="button" data-panel="analysisPanel">Analyze</button>
+        <button class="tab" type="button" data-panel="settingsPanel">Settings</button>
         <button class="tab" type="button" data-panel="botPanel">Bot</button>
       </nav>
 
       <section class="workspace">
-        <section class="panel is-active" id="dailyTasksPanel">
+        <section class="panel is-active" id="dashboardPanel">
+          <div class="panel-head">
+            <div>
+              <h2>Dashboard</h2>
+              <p class="panel-note" id="dashboardMeta">Rule-based timeline summary from Google Sheets.</p>
+            </div>
+            <button type="button" id="refreshDashboardBtn">Refresh</button>
+          </div>
+          <div class="dashboard-grid" id="dashboardGrid" aria-live="polite"></div>
+          <div class="dashboard-columns">
+            <section>
+              <h3>Top Risks</h3>
+              <div class="dashboard-list" id="dashboardRisks"></div>
+            </section>
+            <section>
+              <h3>Owner Workload</h3>
+              <div class="dashboard-list" id="dashboardOwners"></div>
+            </section>
+            <section>
+              <h3>Rock Progress</h3>
+              <div class="dashboard-list" id="dashboardRocks"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="panel" id="dailyTasksPanel">
           <div class="panel-head">
             <div>
               <h2>Daily Tasks</h2>
-              <p class="panel-note" id="dailyTaskMeta">AI review for both games at 06:00 Bangkok time.</p>
+              <p class="panel-note" id="dailyTaskMeta">Rule-based daily board for both games at 06:00 Bangkok time.</p>
             </div>
             <form class="daily-load-form" id="dailyTaskLoadForm">
               <input name="date" type="date" aria-label="Daily task date">
@@ -59,7 +86,7 @@
             <div class="section-body">
               <div class="daily-summary" id="dailyTaskSummary">
                 <strong>Morning task board</strong>
-                <span>Saved daily tasks will load here. Press Re-gen only when you want AI to analyze the full timelines again.</span>
+                <span>Saved daily tasks will load here. Press Re-gen to reload filtered timeline rows.</span>
               </div>
             </div>
           </section>
@@ -68,7 +95,7 @@
             <div class="section-toggle-row">
               <div>
                 <h3>Weekly Tasks</h3>
-                <p class="panel-note" id="weeklyTaskMeta">AI weekly plan for both full project timelines.</p>
+                <p class="panel-note" id="weeklyTaskMeta">Rule-based weekly board for both project timelines.</p>
               </div>
               <div class="panel-actions">
                 <button type="button" id="loadSavedWeeklyBtn">Load Saved</button>
@@ -90,7 +117,7 @@
             <div class="section-toggle-row">
               <div>
                 <h3>Milestone Review</h3>
-                <p class="panel-note" id="milestoneReviewMeta">AI review for both full project timelines at 06:00 Bangkok time.</p>
+                <p class="panel-note" id="milestoneReviewMeta">Rule-based milestone review for both full project timelines at 06:00 Bangkok time.</p>
               </div>
               <div class="panel-actions">
                 <button type="button" id="loadSavedMilestoneBtn">Load Saved</button>
@@ -123,14 +150,34 @@
             </div>
           </section>
 
+          <section class="collapsible-section is-collapsed" data-section="rulePreview">
+            <div class="section-toggle-row">
+              <div>
+                <h3>Rule Preview</h3>
+                <p class="panel-note" id="rulePreviewMeta">Daily/Weekly filter debug from Timeline Start, End, and Percent.</p>
+              </div>
+              <div class="panel-actions">
+                <select id="rulePreviewScope" aria-label="Rule preview scope">
+                  <option value="daily">Daily</option>
+                  <option value="weekly">Weekly</option>
+                </select>
+                <button type="button" id="loadRulePreviewBtn">Preview</button>
+                <button type="button" class="section-toggle" data-toggle-section="rulePreview">Show</button>
+              </div>
+            </div>
+            <div class="section-body">
+              <div class="rule-preview" id="rulePreviewBoard" aria-live="polite"></div>
+            </div>
+          </section>
+
           <form class="daily-submit collapsible-section is-collapsed" id="dailyTaskSubmitForm" data-section="submitWork">
             <div class="section-toggle-row">
               <div>
                 <h3>Submit Work</h3>
-                <p class="panel-note">Adjust today&apos;s percentages, add notes, then send them to AI to update the timeline.</p>
+                <p class="panel-note">Adjust today&apos;s percentages, add notes, then update the timeline.</p>
               </div>
               <div class="panel-actions">
-                <button type="submit">Send To AI</button>
+                <button type="submit">Submit</button>
                 <button type="button" class="section-toggle" data-toggle-section="submitWork">Show</button>
               </div>
             </div>
@@ -266,6 +313,8 @@
           </div>
           <div class="action-grid">
             <button type="button" data-action="/timeline-analysis">Analyze Timeline</button>
+            <button type="button" data-action="/sync-status">Sync Status</button>
+            <button type="button" data-action="/database/cleanup">Clean Database</button>
             <button type="button" data-action="/milestone">Milestone</button>
             <button type="button" data-action="/weekly-goal">Weekly Gold</button>
           </div>
@@ -273,6 +322,20 @@
             <input name="date" type="date">
             <button type="submit">Daily Summary</button>
           </form>
+        </section>
+
+        <section class="panel" id="settingsPanel">
+          <div class="panel-head">
+            <div>
+              <h2>Settings</h2>
+              <p class="panel-note" id="settingsMeta">Edit rule-based settings stored in Google Sheets.</p>
+            </div>
+            <div class="panel-actions">
+              <button type="button" id="loadSettingsBtn">Load</button>
+              <button type="button" id="saveSettingsBtn">Save</button>
+            </div>
+          </div>
+          <div class="settings-table" id="settingsTable" aria-live="polite"></div>
         </section>
 
         <section class="panel" id="botPanel">

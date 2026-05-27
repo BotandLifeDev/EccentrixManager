@@ -16,9 +16,19 @@ const dailySubmitDeveloper = document.querySelector("#dailySubmitDeveloper");
 const weeklyTaskMeta = document.querySelector("#weeklyTaskMeta");
 const weeklyTaskSummary = document.querySelector("#weeklyTaskSummary");
 const weeklyTaskBoard = document.querySelector("#weeklyTaskBoard");
+const rulePreviewMeta = document.querySelector("#rulePreviewMeta");
+const rulePreviewBoard = document.querySelector("#rulePreviewBoard");
+const rulePreviewScope = document.querySelector("#rulePreviewScope");
 const milestoneReviewMeta = document.querySelector("#milestoneReviewMeta");
 const milestoneReviewSummary = document.querySelector("#milestoneReviewSummary");
 const milestoneReviewGrid = document.querySelector("#milestoneReviewGrid");
+const dashboardMeta = document.querySelector("#dashboardMeta");
+const dashboardGrid = document.querySelector("#dashboardGrid");
+const dashboardRisks = document.querySelector("#dashboardRisks");
+const dashboardOwners = document.querySelector("#dashboardOwners");
+const dashboardRocks = document.querySelector("#dashboardRocks");
+const settingsMeta = document.querySelector("#settingsMeta");
+const settingsTable = document.querySelector("#settingsTable");
 
 const teamMembers = [
   { name: "\u0e17\u0e35\u0e19", role: "Leader and overall manager" },
@@ -35,6 +45,8 @@ bindTabs();
 bindForms();
 bindButtons();
 loadStatus();
+loadDashboard();
+loadSettings();
 loadSavedDailyTasks();
 loadSavedWeeklyTasks();
 loadSavedMilestoneReview();
@@ -157,9 +169,25 @@ function bindButtons() {
     await submitSelectedTaskBoard(dailyTaskBoard, "daily", event.currentTarget);
   });
 
+  document.querySelector("#loadRulePreviewBtn").addEventListener("click", async (event) => {
+    await loadRulePreview(event.currentTarget);
+  });
+
   document.querySelector("#dailyTaskSubmitForm").addEventListener("submit", async (event) => {
     event.preventDefault();
     await submitDailyTasks(event.currentTarget);
+  });
+
+  document.querySelector("#refreshDashboardBtn").addEventListener("click", async (event) => {
+    await loadDashboard(event.currentTarget);
+  });
+
+  document.querySelector("#loadSettingsBtn").addEventListener("click", async (event) => {
+    await loadSettings(event.currentTarget);
+  });
+
+  document.querySelector("#saveSettingsBtn").addEventListener("click", async (event) => {
+    await saveSettings(event.currentTarget);
   });
 }
 
@@ -225,6 +253,55 @@ async function loadStatus() {
     renderStatus(null, error);
     interactionEndpoint.value = `${location.origin}/discord/interactions`;
   }
+}
+
+async function loadDashboard(button) {
+  const originalText = button?.textContent;
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Refreshing...";
+  }
+
+  try {
+    const date = document.querySelector("#dailyTaskLoadForm")?.elements.date?.value || new Date().toISOString().slice(0, 10);
+    const data = await request(`/dashboard?date=${encodeURIComponent(date)}`, { method: "GET" });
+    renderDashboard(data);
+  } catch (error) {
+    dashboardGrid.innerHTML = '<div class="empty-state">Dashboard could not be loaded. Check WEB_FORM_SECRET and Google Sheets.</div>';
+    print({ error: error.message });
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalText;
+    }
+  }
+}
+
+async function loadSettings(button) {
+  const originalText = button?.textContent;
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Loading...";
+  }
+
+  try {
+    const data = await request("/settings", { method: "GET" });
+    renderSettings(data);
+  } catch (error) {
+    settingsTable.innerHTML = '<div class="empty-state">Settings could not be loaded. Check WEB_FORM_SECRET and Google Sheets.</div>';
+    print({ error: error.message });
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalText;
+    }
+  }
+}
+
+async function saveSettings(button) {
+  const settings = collectSettingsRows();
+  const result = await postJson("/settings", { settings }, button);
+  if (result) renderSettings(result);
 }
 
 async function loadSavedDailyTasks(form = document.querySelector("#dailyTaskLoadForm")) {
@@ -343,6 +420,29 @@ async function regenerateWeeklyTasks(form = document.querySelector("#dailyTaskLo
   saveLocalWeeklyTasks(result);
   state.weeklyTasks = result;
   renderWeeklyTasks(result);
+}
+
+async function loadRulePreview(button) {
+  const originalText = button?.textContent;
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Loading...";
+  }
+
+  try {
+    const date = document.querySelector("#dailyTaskLoadForm")?.elements.date?.value || new Date().toISOString().slice(0, 10);
+    const scope = rulePreviewScope?.value || "daily";
+    const data = await request(`/rule-preview?date=${encodeURIComponent(date)}&scope=${encodeURIComponent(scope)}`, { method: "GET" });
+    renderRulePreview(data);
+  } catch (error) {
+    rulePreviewBoard.innerHTML = '<div class="empty-state">Rule preview could not be loaded. Check WEB_FORM_SECRET and Google Sheets.</div>';
+    print({ error: error.message });
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalText;
+    }
+  }
 }
 
 async function loadSavedMilestoneReview(form = document.querySelector("#dailyTaskLoadForm")) {
@@ -553,10 +653,114 @@ function renderStatus(data, error) {
   ].join("");
 }
 
+function renderDashboard(data) {
+  const totals = data.totals || {};
+  const dueSoonDays = data.settings?.dueSoonDays || 3;
+  const generated = data.generatedAt ? ` Generated ${new Date(data.generatedAt).toLocaleString()}.` : "";
+  dashboardMeta.textContent = `Rule-based timeline summary for ${data.date}.${generated}`;
+  dashboardGrid.innerHTML = [
+    dashboardMetric("Rows", totals.rows || 0, "All timeline rows with data"),
+    dashboardMetric("Active", totals.active || 0, "Rows below 100%"),
+    dashboardMetric("Done", totals.done || 0, "Completed rows"),
+    dashboardMetric("Overdue", totals.overdue || 0, "End date passed"),
+    dashboardMetric("Due Soon", totals.dueSoon || 0, `Due within ${dueSoonDays} days`),
+    dashboardMetric("Blocked", totals.blocked || 0, "Rows with blockers"),
+  ].join("");
+
+  dashboardRisks.innerHTML = data.topRisks?.length
+    ? data.topRisks.map(renderDashboardRisk).join("")
+    : '<p class="task-empty">No risks detected.</p>';
+  dashboardOwners.innerHTML = data.ownerWorkload?.length
+    ? data.ownerWorkload.map(renderDashboardOwner).join("")
+    : '<p class="task-empty">No active owner workload.</p>';
+  dashboardRocks.innerHTML = data.rockProgress?.length
+    ? data.rockProgress.map(renderDashboardRock).join("")
+    : '<p class="task-empty">No rock progress found.</p>';
+}
+
+function renderSettings(data) {
+  const rows = Array.isArray(data.settings) ? data.settings : [];
+  const parsed = data.parsed || {};
+  settingsMeta.textContent = [
+    `${data.project || "database"} / ${data.sheet || "Settings"}`,
+    `Due soon ${parsed.dueSoonDays || "-"} days`,
+    `Cache ${parsed.databaseCacheRetentionDays || "-"} days`,
+    `Audit ${parsed.databaseAuditRetentionDays || "-"} days`,
+  ].join(" | ");
+
+  settingsTable.innerHTML = [
+    '<div class="settings-header"><strong>Key</strong><strong>Value</strong><strong>Notes</strong></div>',
+    ...rows.map(renderSettingsRow),
+  ].join("");
+}
+
+function renderSettingsRow(row) {
+  return [
+    '<div class="settings-row">',
+    `<input name="key" value="${escapeHtml(row.key || "")}" aria-label="Setting key">`,
+    `<textarea name="value" rows="2" aria-label="Setting value">${escapeHtml(row.value || "")}</textarea>`,
+    `<input name="notes" value="${escapeHtml(row.notes || "")}" aria-label="Setting notes">`,
+    '</div>',
+  ].join("");
+}
+
+function collectSettingsRows() {
+  return [...settingsTable.querySelectorAll(".settings-row")]
+    .map((row) => ({
+      key: row.querySelector('[name="key"]')?.value.trim() || "",
+      value: row.querySelector('[name="value"]')?.value.trim() || "",
+      notes: row.querySelector('[name="notes"]')?.value.trim() || "",
+    }))
+    .filter((row) => row.key);
+}
+
+function dashboardMetric(label, value, hint) {
+  return [
+    '<article class="dashboard-metric">',
+    `<strong>${escapeHtml(label)}</strong>`,
+    `<span>${Number(value || 0).toLocaleString()}</span>`,
+    `<small>${escapeHtml(hint)}</small>`,
+    '</article>',
+  ].join("");
+}
+
+function renderDashboardRisk(item) {
+  const flags = [
+    item.overdue ? "Overdue" : "",
+    item.blocked ? "Blocked" : "",
+    item.dueSoon ? "Due soon" : "",
+    item.lowProgressDeadline ? "Low progress" : "",
+  ].filter(Boolean).join(" / ");
+  return [
+    '<article class="dashboard-row">',
+    `<strong>${escapeHtml(item.project)} #${escapeHtml(item.rowNumber)} - ${escapeHtml(item.task)}</strong>`,
+    `<span>${escapeHtml(flags || item.status || "Watch")} | ${Number(item.percent || 0)}% | ${escapeHtml(item.owner || "Unknown")}</span>`,
+    '</article>',
+  ].join("");
+}
+
+function renderDashboardOwner(item) {
+  return [
+    '<article class="dashboard-row">',
+    `<strong>${escapeHtml(item.owner || "Unknown")}</strong>`,
+    `<span>Active ${item.active || 0} | Overdue ${item.overdue || 0} | Blocked ${item.blocked || 0} | Avg ${item.averageProgress || 0}%</span>`,
+    '</article>',
+  ].join("");
+}
+
+function renderDashboardRock(item) {
+  return [
+    '<article class="dashboard-row">',
+    `<strong>${escapeHtml(item.project)} - ${escapeHtml(item.rock || "No Rock")}</strong>`,
+    `<span>Rows ${item.rows || 0} | Done ${item.done || 0} | Overdue ${item.overdue || 0} | Avg ${item.averageProgress || 0}%</span>`,
+    '</article>',
+  ].join("");
+}
+
 function renderDailyTasks(data) {
   const people = Array.isArray(data.people) ? data.people : [];
   const savedText = data.generatedAt ? ` Generated ${new Date(data.generatedAt).toLocaleString()}.` : "";
-  dailyTaskMeta.textContent = `AI review for ${data.date} at ${data.morningReviewTime || "06:00"} Bangkok time.${savedText}`;
+  dailyTaskMeta.textContent = `Rule-based daily board for ${data.date} at ${data.morningReviewTime || "06:00"} Bangkok time.${savedText}`;
   dailyTaskSummary.innerHTML = [
     `<strong>${escapeHtml(data.headline || "Daily task board")}</strong>`,
     `<span>${escapeHtml(formatDailyTaskSummary(data))}</span>`,
@@ -590,7 +794,7 @@ function asTextList(value) {
 function renderWeeklyTasks(data) {
   const people = Array.isArray(data.people) ? data.people : [];
   const savedText = data.generatedAt ? ` Generated ${new Date(data.generatedAt).toLocaleString()}.` : "";
-  weeklyTaskMeta.textContent = `AI weekly plan for ${data.weekStart} to ${data.weekEnd || ""}.${savedText}`;
+  weeklyTaskMeta.textContent = `Rule-based weekly board for ${data.weekStart} to ${data.weekEnd || ""}.${savedText}`;
   weeklyTaskSummary.innerHTML = [
     `<strong>${escapeHtml(data.headline || "Weekly task board")}</strong>`,
     `<span>${escapeHtml(formatWeeklySummary(data))}</span>`,
@@ -599,6 +803,70 @@ function renderWeeklyTasks(data) {
     ? people.map(renderWeeklyPersonTasks).join("")
     : '<div class="empty-state">No weekly tasks returned by AI.</div>';
   bindPercentSliders(weeklyTaskBoard);
+}
+
+function renderRulePreview(data) {
+  const summary = data.summary || {};
+  rulePreviewMeta.textContent = [
+    `${data.scope || "daily"} ${data.startDate || data.date} to ${data.endDate || data.date}`,
+    `included ${summary.included || 0}`,
+    `skipped ${summary.skipped || 0}`,
+    `no dates ${summary.noDates || 0}`,
+  ].join(" | ");
+
+  const included = Array.isArray(data.included) ? data.included : [];
+  const skipped = Array.isArray(data.skipped) ? data.skipped : [];
+  rulePreviewBoard.innerHTML = [
+    renderRulePreviewStats(summary),
+    renderRulePreviewGroup("Included", included),
+    renderRulePreviewGroup("Skipped", skipped),
+  ].join("");
+}
+
+function renderRulePreviewStats(summary) {
+  return [
+    '<div class="rule-stats">',
+    ruleStat("Total", summary.totalRows || 0),
+    ruleStat("Included", summary.included || 0),
+    ruleStat("Overdue", summary.overdue || 0),
+    ruleStat("In Window", summary.inWindow || 0),
+    ruleStat("Complete", summary.complete || 0),
+    ruleStat("No Dates", summary.noDates || 0),
+    ruleStat("Future", summary.future || 0),
+    '</div>',
+  ].join("");
+}
+
+function ruleStat(label, value) {
+  return `<span><strong>${escapeHtml(label)}</strong>${Number(value || 0).toLocaleString()}</span>`;
+}
+
+function renderRulePreviewGroup(label, rows) {
+  const items = rows.length
+    ? rows.map(renderRulePreviewRow).join("")
+    : '<div class="empty-state">No rows.</div>';
+  return `<section class="rule-preview-group"><h4>${escapeHtml(label)}</h4>${items}</section>`;
+}
+
+function renderRulePreviewRow(row) {
+  const parsedStart = Array.isArray(row.parsedStart) && row.parsedStart.length ? row.parsedStart.join(", ") : "-";
+  const parsedEnd = Array.isArray(row.parsedEnd) && row.parsedEnd.length ? row.parsedEnd.join(", ") : "-";
+  return [
+    `<article class="rule-row ${row.included ? "included" : "skipped"}">`,
+    '<div class="rule-row-head">',
+    `<strong>${escapeHtml(row.projectLabel || row.project)} #${escapeHtml(row.rowNumber)} - ${escapeHtml(row.task || "Untitled")}</strong>`,
+    `<span>${escapeHtml(row.reasonCode || "")}</span>`,
+    '</div>',
+    `<p>${escapeHtml(row.reason || "")}</p>`,
+    '<div class="task-meta-line">',
+    `<span>Owner: ${escapeHtml(row.owner || "Unknown")}</span>`,
+    `<span>Percent: ${Number(row.percent || 0)}%</span>`,
+    `<span>Start: ${escapeHtml(row.rawStart || "-")} -> ${escapeHtml(parsedStart)}</span>`,
+    `<span>End: ${escapeHtml(row.rawEnd || "-")} -> ${escapeHtml(parsedEnd)}</span>`,
+    row.status ? `<span>Status: ${escapeHtml(row.status)}</span>` : "",
+    '</div>',
+    '</article>',
+  ].join("");
 }
 
 function formatWeeklySummary(data) {
@@ -742,6 +1010,7 @@ function renderTaskRow(member, group, task) {
     ` data-title="${escapeHtml(task.title)}"`,
     ` data-project="${escapeHtml(project)}"`,
     ` data-rock="${escapeHtml(rock)}"`,
+    ` data-original-percent="${escapeHtml(current)}"`,
     ` data-row-number="${escapeHtml(task.timelineRowNumber || "")}">`,
     '<label class="task-check">',
     '<input type="checkbox">',
@@ -787,6 +1056,7 @@ function collectProgressItemsFromBoard(board) {
       project: row.dataset.project || "",
       rock: row.dataset.rock || "",
       timelineRowNumber: row.dataset.rowNumber || "",
+      originalPercent: row.dataset.originalPercent || "",
       percent: row.querySelector('input[type="range"]').value,
       currentPercent: row.querySelector('input[type="range"]').value,
       status: row.dataset.group || "",

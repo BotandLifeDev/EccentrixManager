@@ -3224,8 +3224,11 @@ function possibleSheetDates(value) {
     const first = Number(slash[1]);
     const second = Number(slash[2]);
     const year = normalizeCalendarYear(Number(slash[3]));
-    dates.add(formatDateParts(year, first, second));
-    dates.add(formatDateParts(year, second, first));
+    if (first > 12 && second <= 12) {
+      dates.add(formatDateParts(year, second, first));
+    } else {
+      dates.add(formatDateParts(year, first, second));
+    }
   }
 
   const thaiMonth = input.match(/(\d{1,2})\s+([ก-๙]+)\s+(\d{4})/);

@@ -899,6 +899,7 @@ function formatContextSummary(summary) {
     `  timeline total: ${item.timelineTotalCount}`,
     `  timeline with data: ${item.timelineMeaningfulCount}`,
     `  timeline sent to AI: ${item.recentTimelineCount} / ${item.timelineContextLimit}`,
+    `  timeline filtered out: ${item.timelineFilteredOut || 0}`,
     `  feedback total: ${item.feedbackTotalCount}`,
     `  open feedback: ${item.openFeedbackCount}`,
     `  targets total: ${item.weeklyTargetTotalCount}`,

@@ -73,6 +73,21 @@ const TIMELINE_COMPACT_SCHEMA = {
   status: "Status&LateDay",
 };
 
+const TIMELINE_COMPACT_COLUMNS = [
+  "rowNumber",
+  "id",
+  "rock",
+  "pri",
+  "task",
+  "start",
+  "end",
+  "blk",
+  "pct",
+  "resp",
+  "sub",
+  "status",
+];
+
 const FEEDBACK_COMPACT_SCHEMA = {
   rowNumber: "Google Sheet row number",
   date: "Date",
@@ -107,6 +122,12 @@ const PLAN_COMPACT_SCHEMA = {
   success: "Success Criteria",
   deps: "Dependencies",
   status: "Status",
+};
+
+const TIMELINE_CONTEXT_MODE = {
+  DAILY: "daily",
+  WEEKLY: "weekly",
+  MILESTONE: "milestone",
 };
 
 const FEEDBACK_HEADERS = [
@@ -888,7 +909,13 @@ async function createDailyTaskBoard(date = todayBangkok()) {
   const contexts = [];
 
   for (const project of Object.values(PROJECTS)) {
-    contexts.push(await buildFullDailyTaskContext(sheets, project, weekStart, date));
+    contexts.push(await buildFullDailyTaskContext(
+      sheets,
+      project,
+      weekStart,
+      date,
+      TIMELINE_CONTEXT_MODE.DAILY,
+    ));
   }
 
   const response = await grok.chat.completions.create({
@@ -903,9 +930,11 @@ async function createDailyTaskBoard(date = todayBangkok()) {
           "Create a daily work board for a small game team every morning at 06:00 Bangkok time.",
           "The timeline sheet header schema is fixed and must be interpreted exactly as: ID, Rock, Priority, Task, Start, End, Blockers, Percent, Response, Sub Response, Status&LateDay.",
           "Sheet rows are compacted to save tokens. Use each project's timelineSchema, feedbackSchema, targetSchema, and planSchema to interpret short field names. rowNumber is always the Google Sheet row number.",
+          "fullTimeline is encoded as compact arrays. Use timelineColumns as the column order for every fullTimeline row.",
           "Never ask to edit, rename, insert, delete, or overwrite these headers.",
-          "You must inspect 100% of the provided fullTimeline rows for both projects before assigning tasks.",
-          "Do not rely only on recent rows. Use rowCounts to confirm timelineSentToAi equals meaningfulTimeline for each project.",
+          "The backend prefilters fullTimeline to actionable Daily rows: unfinished overdue rows plus rows scheduled today or tomorrow.",
+          "Inspect 100% of the provided filtered fullTimeline rows for both projects before assigning tasks.",
+          "Use rowCounts to understand how many sheet rows were filtered before the AI request.",
           "scheduleSignals is precomputed by the backend from the full timeline. Overdue, dueSoon, activeWindow, blocked, and lowProgressDeadline rows must be considered high priority evidence.",
           "First analyze project problems, blockers, stale work, dependencies, owner workload, dates, time pressure, and deadline risk from every available timeline column.",
           "Use Start as the planned start date, End as the deadline/end date, Percent as completion percentage, Blockers as blocking issues, Priority as urgency, Task as the work item, Rock as milestone/rock grouping, Response/Sub Response as owner or response context, and Status&LateDay as late/status signal.",
@@ -1097,7 +1126,13 @@ async function createWeeklyTaskBoard(weekStart = currentWeekStartBangkok()) {
   const contexts = [];
 
   for (const project of Object.values(PROJECTS)) {
-    contexts.push(await buildFullDailyTaskContext(sheets, project, normalizedWeekStart, normalizedWeekStart));
+    contexts.push(await buildFullDailyTaskContext(
+      sheets,
+      project,
+      normalizedWeekStart,
+      normalizedWeekStart,
+      TIMELINE_CONTEXT_MODE.WEEKLY,
+    ));
   }
 
   const response = await grok.chat.completions.create({
@@ -1112,8 +1147,10 @@ async function createWeeklyTaskBoard(weekStart = currentWeekStartBangkok()) {
           "Create a weekly work board for the whole game team.",
           "The timeline sheet header schema is fixed and must be interpreted exactly as: ID, Rock, Priority, Task, Start, End, Blockers, Percent, Response, Sub Response, Status&LateDay.",
           "Sheet rows are compacted to save tokens. Use each project's timelineSchema, feedbackSchema, targetSchema, and planSchema to interpret short field names. rowNumber is always the Google Sheet row number.",
+          "fullTimeline is encoded as compact arrays. Use timelineColumns as the column order for every fullTimeline row.",
           "Never ask to edit, rename, insert, delete, or overwrite these headers.",
-          "You must inspect 100% of the provided fullTimeline rows for both projects before assigning weekly work.",
+          "The backend prefilters fullTimeline to actionable Weekly rows: unfinished overdue rows plus rows scheduled during the selected week.",
+          "Inspect 100% of the provided filtered fullTimeline rows for both projects before assigning weekly work.",
           "Weekly Tasks must answer: what should be finished by the end of this week, what late work must be recovered, and what can be advanced if there is spare capacity.",
           "Every overdue row and every lowProgressDeadline row in scheduleSignals must appear in recoveryTasks or mustFinishThisWeek for its owner unless it is clearly complete.",
           "Use Start/End to decide what belongs in this week. Use Percent and Status&LateDay to decide whether it is late, behind, or on track.",
@@ -1170,7 +1207,13 @@ async function createMilestoneReview(date = todayBangkok()) {
   const contexts = [];
 
   for (const project of Object.values(PROJECTS)) {
-    contexts.push(await buildFullDailyTaskContext(sheets, project, weekStart, date));
+    contexts.push(await buildFullDailyTaskContext(
+      sheets,
+      project,
+      weekStart,
+      date,
+      TIMELINE_CONTEXT_MODE.MILESTONE,
+    ));
   }
 
   const response = await grok.chat.completions.create({
@@ -1185,6 +1228,7 @@ async function createMilestoneReview(date = todayBangkok()) {
           "Create a milestone review for both game projects at the same 06:00 Bangkok morning review time as Daily Tasks.",
           "The timeline sheet header schema is fixed and must be interpreted exactly as: ID, Rock, Priority, Task, Start, End, Blockers, Percent, Response, Sub Response, Status&LateDay.",
           "Sheet rows are compacted to save tokens. Use each project's timelineSchema, feedbackSchema, targetSchema, and planSchema to interpret short field names. rowNumber is always the Google Sheet row number.",
+          "fullTimeline is encoded as compact arrays. Use timelineColumns as the column order for every fullTimeline row.",
           "Never ask to edit, rename, insert, delete, or overwrite these headers.",
           "You must inspect 100% of each project's provided fullTimeline rows before estimating milestone progress.",
           "scheduleSignals is precomputed by the backend from the full timeline. Use it to identify late, due soon, blocked, low progress, and currently scheduled milestone work.",
@@ -1692,6 +1736,8 @@ function summarizeProjectContexts(contexts) {
     timelineMeaningfulCount: context.rowCounts.meaningfulTimeline,
     timelineSentToAi: context.rowCounts.timelineSentToAi,
     timelineContextLimit: context.rowCounts.timelineContextLimit,
+    timelineFilteredOut: context.rowCounts.timelineFilteredOut || 0,
+    timelineFilter: context.timelineFilter || null,
     fullTimelineCount: context.fullTimeline?.length || 0,
     recentTimelineCount: context.recentTimeline.length,
     scheduleSignalCount: context.scheduleSignals
@@ -1708,15 +1754,18 @@ function summarizeProjectContexts(contexts) {
     weeklyTargetCount: context.weeklyTargets.length,
     weeklyPlanTotalCount: context.rowCounts.weeklyPlan,
     currentPlanCount: context.currentPlan.length,
-    latestTimeline: context.recentTimeline.slice(-3).map((row) => ({
-      rowNumber: row.rowNumber,
-      start: row.start,
-      owner: row.resp,
-      task: row.task,
-      percent: row.pct,
-      blockers: row.blk,
-      status: row.status,
-    })),
+    latestTimeline: context.recentTimeline.slice(-3).map((sourceRow) => {
+      const row = compactTimelineArrayToObject(sourceRow);
+      return {
+        rowNumber: row.rowNumber,
+        start: row.start,
+        owner: row.resp,
+        task: row.task,
+        percent: row.pct,
+        blockers: row.blk,
+        status: row.status,
+      };
+    }),
   }));
 }
 
@@ -2439,7 +2488,13 @@ async function buildProjectManagementContext(sheets, project, weekStart) {
   };
 }
 
-async function buildFullDailyTaskContext(sheets, project, weekStart, reviewDate = todayBangkok()) {
+async function buildFullDailyTaskContext(
+  sheets,
+  project,
+  weekStart,
+  reviewDate = todayBangkok(),
+  contextMode = TIMELINE_CONTEXT_MODE.MILESTONE,
+) {
   const timelineRows = await readRowsRaw(sheets, project, project.sheetName, "A:K");
   const feedbackRows = await readRows(sheets, project, project.feedbackSheetName, "A:I");
   const targetRows = await readRows(sheets, project, project.targetSheetName, "A:I");
@@ -2451,7 +2506,12 @@ async function buildFullDailyTaskContext(sheets, project, weekStart, reviewDate 
     .map((row, index) => ({ row, rowNumber: index + 2 }))
     .filter((item) => isMeaningfulSheetRow(item.row));
   const fullTimelineObjects = meaningfulTimelineRows.map((item) => sheetRowToObject(timelineHeaders, item.row, item.rowNumber));
-  const scheduleSignals = buildScheduleSignals(project, fullTimelineObjects, reviewDate);
+  const filteredTimelineObjects = filterTimelineRowsForAi(fullTimelineObjects, {
+    mode: contextMode,
+    reviewDate,
+    weekStart,
+  });
+  const scheduleSignals = buildScheduleSignals(project, filteredTimelineObjects, reviewDate);
 
   return {
     project: project.label,
@@ -2461,13 +2521,16 @@ async function buildFullDailyTaskContext(sheets, project, weekStart, reviewDate 
     rowCounts: {
       timeline: timelineDataRows.length,
       meaningfulTimeline: meaningfulTimelineRows.length,
-      timelineSentToAi: meaningfulTimelineRows.length,
-      timelineContextLimit: "full",
+      timelineSentToAi: filteredTimelineObjects.length,
+      timelineContextLimit: contextMode === TIMELINE_CONTEXT_MODE.MILESTONE ? "full" : contextMode,
+      timelineFilteredOut: Math.max(0, meaningfulTimelineRows.length - filteredTimelineObjects.length),
       feedback: Math.max(0, feedbackRows.length - 1),
       weeklyTargets: Math.max(0, targetRows.length - 1),
       weeklyPlan: Math.max(0, planRows.length - 1),
     },
+    timelineFilter: buildTimelineFilterSummary(contextMode, reviewDate, weekStart),
     timelineHeaders,
+    timelineColumns: TIMELINE_COMPACT_COLUMNS,
     actualTimelineHeaders,
     expectedTimelineHeaders: TIMELINE_HEADERS,
     timelineHeaderMatchesExpected: TIMELINE_HEADERS.every((header, index) => actualTimelineHeaders[index] === header),
@@ -2475,9 +2538,9 @@ async function buildFullDailyTaskContext(sheets, project, weekStart, reviewDate 
     feedbackSchema: FEEDBACK_COMPACT_SCHEMA,
     targetSchema: TARGET_COMPACT_SCHEMA,
     planSchema: PLAN_COMPACT_SCHEMA,
-    fullTimeline: fullTimelineObjects.map(compactTimelineRow),
+    fullTimeline: filteredTimelineObjects.map(compactTimelineRowArray),
     scheduleSignals,
-    recentTimeline: meaningfulTimelineRows.slice(-10).map(compactTimelineRow),
+    recentTimeline: filteredTimelineObjects.slice(-10).map(compactTimelineRowArray),
     openFeedback: feedbackRows
       .slice(1)
       .map((row, index) => ({ row, rowNumber: index + 2 }))
@@ -2566,6 +2629,104 @@ function compactTimelineRow(item) {
     sub: row.subResponse ?? row[9],
     status: row.statusLateDay ?? row[10],
   });
+}
+
+function compactTimelineRowArray(item) {
+  const row = compactTimelineRow(item);
+  const values = TIMELINE_COMPACT_COLUMNS.map((column) => row[column] ?? "");
+
+  while (values.length > 1 && values[values.length - 1] === "") {
+    values.pop();
+  }
+
+  return values;
+}
+
+function compactTimelineArrayToObject(row) {
+  if (!Array.isArray(row)) return row || {};
+  return Object.fromEntries(
+    TIMELINE_COMPACT_COLUMNS.map((column, index) => [column, row[index] ?? ""]),
+  );
+}
+
+function filterTimelineRowsForAi(rows, options = {}) {
+  const mode = options.mode || TIMELINE_CONTEXT_MODE.MILESTONE;
+  if (mode === TIMELINE_CONTEXT_MODE.MILESTONE) return rows;
+
+  const reviewDate = normalizeDate(options.reviewDate);
+  const reviewTime = dateToBangkokTime(reviewDate);
+  const startDate = mode === TIMELINE_CONTEXT_MODE.WEEKLY
+    ? normalizeWeekStart(options.weekStart || reviewDate)
+    : reviewDate;
+  const endDate = mode === TIMELINE_CONTEXT_MODE.WEEKLY
+    ? weekEndFromStart(startDate)
+    : addDaysToDate(reviewDate, 1);
+  const startTime = dateToBangkokTime(startDate);
+  const endTime = dateToBangkokTime(endDate);
+
+  return rows.filter((row) => {
+    const info = getTimelineRowScheduleInfo(row);
+    if (info.isComplete) return false;
+    if (info.times.length === 0) return false;
+    if (info.times.some((time) => time >= startTime && time <= endTime)) return true;
+    return info.times.some((time) => time < reviewTime);
+  });
+}
+
+function buildTimelineFilterSummary(mode, reviewDate, weekStart) {
+  if (mode === TIMELINE_CONTEXT_MODE.MILESTONE) {
+    return {
+      mode,
+      rule: "milestone review uses all meaningful timeline rows",
+    };
+  }
+
+  const normalizedReviewDate = normalizeDate(reviewDate);
+  const startDate = mode === TIMELINE_CONTEXT_MODE.WEEKLY
+    ? normalizeWeekStart(weekStart || normalizedReviewDate)
+    : normalizedReviewDate;
+  const endDate = mode === TIMELINE_CONTEXT_MODE.WEEKLY
+    ? weekEndFromStart(startDate)
+    : addDaysToDate(normalizedReviewDate, 1);
+
+  return {
+    mode,
+    startDate,
+    endDate,
+    include: mode === TIMELINE_CONTEXT_MODE.WEEKLY
+      ? "unfinished overdue rows plus unfinished rows with Start/End in this week"
+      : "unfinished overdue rows plus unfinished rows with Start/End today or tomorrow",
+    exclude: "rows without parseable Start/End dates",
+    completeRule: "Percent >= 100 or done/complete status is excluded",
+  };
+}
+
+function getTimelineRowScheduleInfo(row) {
+  const fields = row.fields || {};
+  const values = [
+    fields.Start,
+    fields.End,
+    row.start,
+    row.end,
+  ];
+  const times = values
+    .flatMap((value) => [...possibleSheetDates(value)])
+    .map(dateToBangkokTime)
+    .filter((time) => Number.isFinite(time));
+  const percent = clampPercent(row.percent ?? fields.Percent);
+  const statusText = [
+    row.statusLateDay,
+    fields["Status&LateDay"],
+    fields.Status,
+    fields.Percent,
+    row.percent,
+  ].map(cleanSheetCellValue).join(" ").toLowerCase();
+
+  return {
+    times,
+    percent,
+    isComplete: percent >= 100 || /(^|\b)(done|complete|completed|finished|closed)(\b|$)|เสร็จ|ปิดงาน/.test(statusText),
+  };
 }
 
 function compactFeedbackRow(row) {
@@ -3185,6 +3346,16 @@ function possibleSheetDates(value) {
     dates.add(formatDateParts(normalizeCalendarYear(Number(iso[1])), Number(iso[2]), Number(iso[3])));
   }
 
+  const weekdayDateMatches = input.matchAll(
+    /\b(?:sun|mon|tue|tues|wed|thu|thur|thurs|fri|sat)[a-z]*\.?\s+(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})\b/gi,
+  );
+  for (const match of weekdayDateMatches) {
+    const month = Number(match[1]);
+    const day = Number(match[2]);
+    const year = normalizeCalendarYear(Number(match[3]));
+    dates.add(formatDateParts(year, month, day));
+  }
+
   const slashMatches = input.matchAll(/(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})/g);
   for (const slash of slashMatches) {
     const first = Number(slash[1]);
@@ -3208,6 +3379,19 @@ function possibleSheetDates(value) {
   }
 
   return new Set([...dates].filter(Boolean));
+}
+
+function dateToBangkokTime(value) {
+  const normalized = normalizeDate(value);
+  const date = new Date(`${normalized}T00:00:00+07:00`);
+  return date.getTime();
+}
+
+function addDaysToDate(value, days) {
+  const time = dateToBangkokTime(value);
+  if (!Number.isFinite(time)) return normalizeDate(value);
+  const date = new Date(time + Number(days || 0) * 24 * 60 * 60 * 1000);
+  return date.toLocaleDateString("en-CA", { timeZone: "Asia/Bangkok" });
 }
 
 const THAI_MONTHS = {
